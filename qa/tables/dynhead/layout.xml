@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Layout xmlns="urn:speedata.de:2009/publisher/en"
+  xmlns:sd="urn:speedata:2009/publisher/functions/en">
+
+  <Options show-grid="yes" cutmarks="no" trim="0mm"/>
+
+  <Pageformat width="100mm" height="100mm"/>
+  <SetGrid height="12pt" nx="4"/>
+  <DefineColor name="gray" value="#ddd"/>
+  <DefineColor name="green" value="#0e0"/>
+  
+  <Record element="data">
+    <SetVariable variable="a" select="10"/>
+    <SetVariable variable="b" select="6"/>
+    <SetVariable variable="c" select="16"/>
+    <SetVariable variable="d" select="5"/>
+
+    <PlaceObject>
+      <Table stretch="max">
+        <Tablehead>
+          <Tr backgroundcolor="green"><Td><Paragraph><Value>A head</Value></Paragraph></Td></Tr>
+        </Tablehead>
+        <Tr sethead="yes" backgroundcolor="gray"><Td><Paragraph><Value>Header A (</Value><Value select="$a"/><Value>)</Value></Paragraph></Td></Tr>
+        <Loop select="$a" variable="i">
+          <Tr>
+            <Td><Paragraph><Value>Entry A </Value><Value select="$i"/></Paragraph></Td>
+          </Tr>
+        </Loop>
+        <Tr sethead="yes" backgroundcolor="gray"><Td><Paragraph><Value>Header B (</Value><Value select="$b"/><Value>)</Value></Paragraph></Td></Tr>
+        <Loop select="$b" variable="i">
+          <Tr>
+            <Td><Paragraph><Value>Entry B </Value><Value select="$i"/></Paragraph></Td>
+          </Tr>
+        </Loop>
+        <Tr sethead="yes" backgroundcolor="gray"><Td><Paragraph><Value>Header C (</Value><Value select="$c"/><Value>)</Value></Paragraph></Td></Tr>
+        <Loop select="$c" variable="i">
+          <Tr>
+            <Td><Paragraph><Value>Entry C </Value><Value select="$i"/></Paragraph></Td>
+          </Tr>
+        </Loop>
+        <!-- break-below="no": don't repeat the 'Header D' -->
+        <Tr  break-below="no" sethead="yes" backgroundcolor="gray"><Td><Paragraph><Value>Header D (</Value><Value select="$d"/><Value>)</Value></Paragraph></Td></Tr>
+        <Loop select="$d" variable="i">
+          <Tr>
+            <Td><Paragraph><Value>Entry D </Value><Value select="$i"/></Paragraph></Td>
+          </Tr>
+        </Loop>
+      </Table>
+    </PlaceObject>
+  </Record>
+
+
+
+</Layout>

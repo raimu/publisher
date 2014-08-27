@@ -1,11 +1,11 @@
 --- Here goes everything that does not belong anywhere else. Other parts are font handling, the command
---- list, page and gridsetup, debugging and initialization. We start with the function `dothings()` that
---- initializes some variables and starts processing (`dispatch())
+--- list, page and gridsetup, debugging and initialization. We start with the function publisher#dothings that
+--- initializes some variables and starts processing (publisher#dispatch())
 --
 --  publisher.lua
 --  speedata publisher
 --
---  Copyright 2010-2014 Patrick Gundlach.
+--  For a list of authors see `git blame'
 --  See file COPYING in the root directory for license info.
 
 file_start("publisher.lua")
@@ -15,6 +15,7 @@ local luxor = do_luafile("luxor.lua")
 
 local http = require("socket.http")
 local url = require("socket_url")
+local spotcolors = require("spotcolors")
 
 xpath = do_luafile("xpath.lua")
 
@@ -36,9 +37,13 @@ do_luafile("layout_functions.lua")
 --- One big point (DTP point, PostScript point) is approx. 65781 scaled points.
 factor = 65781
 
---- We use a lot of attributes to delay the processing of font shapes, ... to
---- a later time. These attributes have have any number, they just need to be
---- constant across the whole source.
+--- Attributes
+--- ----------
+--- Attributes are attached to nodes, so we can store information that are not present in the
+--- nodes themselves or are evaluated later on (such as font selection - when generating glyph
+--- nodes, we don't yet know what font the user will use).
+---
+--- Attributes may have any number, they just need to be constant across the whole source.
 att_fontfamily     = 1
 att_italic         = 2
 att_bold           = 3
@@ -65,6 +70,7 @@ att_space_amount   = 301
 att_break_below_forbidden = 400
 att_break_above           = 401
 att_omit_at_top           = 402
+att_use_as_head           = 403
 
 --- `att_is_table_row` is used in `tabular.lua` and if set to 1, it denotes
 --- a regular table row, and not a spacer. Spacers must not appear
@@ -72,11 +78,19 @@ att_omit_at_top           = 402
 att_is_table_row    = 500
 att_tr_dynamic_data = 501
 
+-- for border-collapse (vertical)
+att_tr_shift_up     = 550
+
 -- Force a hbox line height
 att_lineheight = 600
 
+-- server-mode / linebreaking
+att_keep = 700
+
 -- Debugging / see att_origin
 origin_table = 1
+origin_vspace = 2
+origin_align_top = 3
 
 
 user_defined_addtolist = 1
@@ -99,15 +113,14 @@ vlist_node     = node.id("vlist")
 local t = node.whatsits()
 for k,v in pairs(node.whatsits()) do
     if v == "user_defined" then
+        -- for action/mark command
         user_defined_whatsit = k
     end
 end
 
-pdf_literal_node = node.subtype("pdf_literal")
+alternating = {}
 
-publisher.alternating = {}
-
-default_areaname = "__seite"
+default_areaname = "_default_area"
 
 -- The name of the next requested page
 nextpage = nil
@@ -121,7 +134,7 @@ defaultlanguage = 0
 -- Startpage
 current_pagenumber = 1
 
-seiten = {}
+pages = {}
 
 -- CSS properties. Use `:matches(tbl)` to find a matching rule. `tbl` has the following structure: `{element=..., id=..., class=... }`
 css = do_luafile("css.lua"):new()
@@ -141,8 +154,16 @@ groups    = {}
 -- sometimes we want to save pages for later reuse. Keys are pagestore names
 pagestore = {}
 
-colors    = { Schwarz = { model="grau", g = "0", pdfstring = " 0 G 0 g " }, black = { model="grau", g = "0", pdfstring = " 0 G 0 g " } }
+
+-- The spot colors used in the document (even when discarded)
+used_spotcolors = {}
+
+-- The predefined colors. index = 1 because we "know" that black will be the first registered color.
+colors  = { black = { model="gray", g = "0", pdfstring = " 0 G 0 g ", index = 1 } }
+
+-- An array of defined colors
 colortable = {}
+
 data_dispatcher = {}
 user_defined_functions = { last = 0}
 markers = {}
@@ -169,6 +190,7 @@ textformats = {
     __centered     = { indent = 0, alignment="centered",    rows = 1},
     __leftaligned  = { indent = 0, alignment="leftaligned", rows = 1},
     __rightaligned = { indent = 0, alignment="rightaligned",rows = 1},
+    __justified    = { indent = 0, alignment="justified",   rows = 1},
     centered       = { indent = 0, alignment="centered",    rows = 1},
     left           = { indent = 0, alignment="leftaligned", rows = 1},
     right          = { indent = 0, alignment="rightaligned",rows = 1},
@@ -177,163 +199,9 @@ textformats = {
     rechts         = { indent = 0, alignment="rightaligned",rows = 1},
 }
 
--- Liste der Schriftarten und deren Synonyme. Beispielsweise könnte ein Schlüssel `Helvetica` sein,
--- der Eintrag dann `texgyreheros-regular.otf`
--- schrifttabelle = {}
-
---- We map from sybolic names to (part of) file names. The hyphenation pattern files are
---- in the format `hyph-XXX.pat.txt` and we need to find out that `XXX` part.
-language_mapping = {
-    ["Czech"]                        = "cs",
-    ["Danish"]                       = "da",
-    ["Dutch"]                        = "nl",
-    ["Englisch (Great Britan)"]      = "en_GB",
-    ["Englisch (USA)"]               = "en_US",
-    ["Finnish"]                      = "fi",
-    ["French"]                       = "fr",
-    ["German"]                       = "de",
-    ["Greek"]                        = "el",
-    ["Hungarian"]                    = "hu",
-    ["Italian"]                      = "it",
-    ["Norwegian Bokmål"]             = "nb",
-    ["Norwegian Nynorsk"]            = "nn",
-    ["Polish"]                       = "pt",
-    ["Portuguese"]                   = "pt",
-    ["Russian"]                      = "ru",
-    ["Serbian"]                      = "sr",
-    ["Spanish"]                      = "es",
-    ["Swedish"]                      = "sv",
-    ["Turkish"]                      = "tr",
-}
-
--- af, Afrikaans - Afrikaans
--- as, Assamese - Assamesisch
--- bg, Bulgarian - Bulgarisch
--- ca, Catalan - Katalanisch
--- cs, Czech - Tschechisch
--- cy, Welsh - Kymrisch
--- da, Danish - Dänisch
--- de, German - Deutsch
--- el, Greek - Neugriechisch
--- en, English - Englisch
--- en_US,
--- eo, Esperanto - Esperanto
--- es, Spanish - Spanisch
--- et, Estonian - Estnisch
--- eu, Basque - Baskisch
--- fi, Finnish - Finnisch
--- fr, French - Französisch
--- ga, Irish - Irisch
--- gl, Galician - Galicisch
--- gu, Gujarati - Gujarati
--- hi, Hindi - Hindi
--- hr, Croatian - Kroatisch
--- hu, Hungarian - Ungarisch
--- hy, Armenian - Armenisch
--- ia, Interlingua - Interlingua
--- id, Indonesian - Bahasa Melayu
--- is, Icelandic - Isländisch
--- it, Italian - Italienisch
--- ku, Kurdish - Kurdisch
--- kn, Kannada - Kannada
--- la, Latin - Latein
--- lo, Lao - Laotisch
--- lt, Lithuanian - Litauisch
--- ml, Malayalam - Malayalam
--- lv, Latvian - Lettisch
--- ml, Malayalam - Malayalam
--- mn, Mongolian - Mongolisch
--- mr, Marathi - Marathi
--- nb, Norwegian Bokmål - Bokmål
--- nl, Dutch - Niederländisch
--- nn, Norwegian Nynorsk - Nynorsk
--- or, Oriya - Oriya
--- pa, Panjabi - Pandschabi
--- pl, Polish - Polnisch
--- pt, Portuguese - Portugiesisch
--- ro, Romanian - Rumänisch
--- ru, Russian - Russisch
--- sa, Sanskrit - Sanskrit
--- sk, Slovak - Slowakisch
--- sl, Slovenian - Slowenisch
--- sr, Serbian - Serbisch
--- sv, Swedish - Schwedisch
--- ta, Tamil - Tamil
--- te, Telugu - Telugu
--- tk, Turkmen - Turkmenisch
--- tr, Turkish - Türkisch
--- uk, Ukrainian - Ukrainisch
--- zh, Chinese - Chinesisch
-
-
-language_filename = {
-    ["af"]    = "af",
-    ["as"]    = "as",
-    ["bg"]    = "bg",
-    ["ca"]    = "ca",
-    ["cs"]    = "cs",
-    ["cy"]    = "cy",
-    ["da"]    = "da",
-    ["de"]    = "de-1996",
-    ["el"]    = "el-monoton",
-    ["en"]    = "en-gb",
-    ["en_GB"] = "en-gb",
-    ["en_US"] = "en-us",
-    ["eo"]    = "eo",
-    ["es"]    = "es",
-    ["et"]    = "et",
-    ["eu"]    = "eu",
-    ["fi"]    = "fi",
-    ["fr"]    = "fr",
-    ["ga"]    = "ga",
-    ["gl"]    = "gl",
-    ["gu"]    = "gu",
-    ["hi"]    = "hi",
-    ["hr"]    = "hr",
-    ["hu"]    = "hu",
-    ["hy"]    = "hy",
-    ["ia"]    = "ia",
-    ["id"]    = "id",
-    ["is"]    = "is",
-    ["it"]    = "it",
-    ["ku"]    = "kmr",
-    ["kn"]    = "kn",
-    ["la"]    = "la",
-    ["lo"]    = "lo",
-    ["lt"]    = "lt",
-    ["ml"]    = "ml",
-    ["lv"]    = "lv",
-    ["ml"]    = "ml",
-    ["mn"]    = "mn-cyrl",
-    ["mr"]    = "mr",
-    ["nb"]    = "nb",
-    ["nl"]    = "nl",
-    ["nn"]    = "nn",
-    ["or"]    = "or",
-    ["pa"]    = "pa",
-    ["pl"]    = "pl",
-    ["pt"]    = "pt",
-    ["ro"]    = "ro",
-    ["ru"]    = "ru",
-    ["sa"]    = "sa",
-    ["sk"]    = "sk",
-    ["sl"]    = "sl",
-    ["sr"]    = "sr",
-    ["sv"]    = "sv",
-    ["ta"]    = "ta",
-    ["te"]    = "te",
-    ["tk"]    = "tk",
-    ["tr"]    = "tr",
-    ["uk"]    = "uk",
-    ["zh"]    = "zh-latn",
-}
-
---- Once a hyphenation pattern file is loaded, we only need the _id_ of it. This is stored in the
---- `languages` table. Key is the filename part (such as `de-1996`) and the value is the internal
---- language id.
-languages = {}
 
 --- The bookmarks table has the format
+---
 ---     bookmarks = {
 ---       { --- first bookmark
 ---         name = "outline 1" destination = "..." open = true,
@@ -351,12 +219,13 @@ bookmarks = {}
 
 --- A table with key namespace prefix (`de` or `en`) and value namespace. Example:
 ---
----    {
----      [""] = "urn:speedata.de:2009/publisher/de"
----      sd = "urn:speedata:2009/publisher/functions/de"
----    }
+---     {
+---       [""] = "urn:speedata.de:2009/publisher/de"
+---       sd = "urn:speedata:2009/publisher/functions/de"
+---     }
 namespaces_layout = nil
 
+--- We need the separator for writing files in a directory structure (image cace for now)
 os_separator = "/"
 if os.type == "windows" then
     os_separator = "\\"
@@ -364,6 +233,15 @@ end
 
 -- A very large length
 maxdimen = 1073741823
+
+-- It's convenient to just copy the stretching glue instead of writing
+-- the stretch etc. over and over again.
+glue_stretch2 = node.new("glue")
+glue_stretch2.spec = node.new("glue_spec")
+glue_stretch2.spec.stretch = 2^16
+glue_stretch2.spec.stretch_order = 2
+
+
 --- The dispatch table maps every element in the layout xml to a command in the `commands.lua` file.
 local dispatch_table = {
     A                       = commands.a,
@@ -377,6 +255,7 @@ local dispatch_table = {
     Bookmark                = commands.bookmark,
     Box                     = commands.box,
     Br                      = commands.br,
+    Color                   = commands.color,
     Column                  = commands.column,
     Columns                 = commands.columns,
     ["Copy-of"]             = commands.copy_of,
@@ -443,6 +322,7 @@ local dispatch_table = {
     URL                     = commands.url,
     Value                   = commands.value,
     Variable                = commands.variable,
+    VSpace                  = commands.vspace,
     While                   = commands.while_do,
 }
 
@@ -470,15 +350,16 @@ end
 
 --- The returned table is an array with hashes. The keys of these
 --- hashes are `elementname` and `contents`. For example:
----    {
----      [1] = {
----        ["elementname"] = "Paragraph"
----        ["contents"] = {
----          ["nodelist"] = "<node    nil <  58515 >    nil : glyph 1>"
----        },
----      },
----    },
-function dispatch(layoutxml,dataxml,optionen)
+---
+---     {
+---       [1] = {
+---         ["elementname"] = "Paragraph"
+---         ["contents"] = {
+---           ["nodelist"] = "<node    nil <  58515 >    nil : glyph 1>"
+---         },
+---       },
+---     },
+function dispatch(layoutxml,dataxml,options)
     local ret = {}
     local tmp
     if not layoutxml then
@@ -490,7 +371,7 @@ function dispatch(layoutxml,dataxml,optionen)
         if type(j)=="table" then
             local eltname = translate_element(j[".__local_name"])
             if dispatch_table[eltname] ~= nil then
-                tmp = dispatch_table[eltname](j,dataxml,optionen)
+                tmp = dispatch_table[eltname](j,dataxml,options)
 
                 -- Copy-of-elements can be resolveld immediately
                 if eltname == "Copy-of" or eltname == "Switch" or eltname == "ForAll" or eltname == "Loop" then
@@ -507,8 +388,7 @@ function dispatch(layoutxml,dataxml,optionen)
                     ret[#ret + 1] =   { elementname = eltname, contents = tmp }
                 end
             else
-                err("Unknown element found in layoutfile: %q", eltname or "???")
-                printtable("j",j)
+                err("Unknown element found in layoutfile: %q", j[".__local_name"] or "???")
             end
         end
     end
@@ -549,17 +429,21 @@ function bookmarkstotex( tbl )
 end
 
 function page_initialized_p( pagenumber )
-    return seiten[pagenumber] ~= nil
+    return pages[pagenumber] ~= nil
 end
 
 --- Start the processing (`dothings()`)
 --- -------------------------------
---- This is the entry point of the processing. It is called from `spinit.lua`/`main_loop()`.
+--- This is the entry point of the processing. It is called from publisher.spinit#main_loop.
 function dothings()
     --- First we set some defaults.
     --- A4 paper is 210x297 mm
     set_pageformat(tex.sp("210mm"),tex.sp("297mm"))
     get_languagecode(os.getenv("SP_MAINLANGUAGE") or "en_GB")
+
+
+    register_color("black")
+
 
     --- The free font family `TeXGyreHeros` is a Helvetica clone and is part of the
     --- [The TeX Gyre Collection of Fonts](http://www.gust.org.pl/projects/e-foundry/tex-gyre).
@@ -571,9 +455,26 @@ function dothings()
     --- Define a basic font family with name `text`:
     define_default_fontfamily()
 
+    --- The server mode is quite interesting: we don't generate a PDF, but wait for requests and try to answer
+    --- them. We rely on the internal communication (tcp) in publisher.server#servermode.
+    if arg[2] == "___server___" then
+        local s = require("publisher.server")
+        s.servermode(tcp)
+    else
+        initialize_luatex_and_generate_pdf()
+        -- The last thing is to put a stamp in the PDF
+        pdf.immediateobj("(Created with the speedata Publisher - www.speedata.de)")
+    end
+end
+
+-- When not in server mode, we initialize LuaTeX in such a way that
+-- it has defaults, loads a layout file and a data file and
+-- executes them both
+function initialize_luatex_and_generate_pdf()
+
     --- The default page type has 1cm margin
     local onecm=tex.sp("1cm")
-    masterpages[1] = { is_pagetype = "true()", res = { {elementname = "Margin", contents = function(_page) _page.grid:set_margin(onecm,onecm,onecm,onecm) end }}, name = "Seite",ns={[""] = "urn:speedata.de:2009/publisher/en" } }
+    masterpages[1] = { is_pagetype = "true()", res = { {elementname = "Margin", contents = function(_page) _page.grid:set_margin(onecm,onecm,onecm,onecm) end }}, name = "Default Page",ns={[""] = "urn:speedata.de:2009/publisher/en" } }
 
     --- Both the data and the layout instructions are written in XML.
     local layoutxml = load_xml(arg[2],"layout instructions")
@@ -590,6 +491,10 @@ function dothings()
 
     --- Used in `xpath.lua` to find out which language the function is in.
     local ns = layoutxml[".__namespace"]
+    if not ns then
+        err("Cannot find the namespace of the layout file. What should I do?")
+        exit()
+    end
 
     --- The currently active layout language. One of `de` or `en`.
     current_layoutlanguage = string.gsub(ns,"urn:speedata.de:2009/publisher/","")
@@ -614,6 +519,11 @@ function dothings()
             exit()
         end
     end
+
+    -- We define two graphic states for overprinting on and off.
+    GS_State_OP_On  = pdf.immediateobj([[<< /Type/ExtGState /OP true /OPM 1 >>]])
+    GS_State_OP_Off = pdf.immediateobj([[<< /Type/ExtGState /OP false >>]])
+
     dispatch(layoutxml)
 
     --- override options set in the `<Options>` element
@@ -638,6 +548,12 @@ function dothings()
         options.showgrid = true
     end
 
+    if options.cutmarks == "true" then
+        options.cutmarks = true
+    elseif options.cutmarks == "false" then
+        options.cutmarks = false
+    end
+
     if options.showgridallocation == "false" then
         options.showgridallocation = false
     elseif options.showgridallocation == "true" then
@@ -653,6 +569,10 @@ function dothings()
         else
             err("Can't recognize starting page number %q",options.startpage)
         end
+    end
+
+    if options.colorprofile then
+        spotcolors.set_colorprofile_filename(options.colorprofile)
     end
 
     local auxfilename = tex.jobname .. "-aux.xml"
@@ -692,22 +612,28 @@ function dothings()
         exit()
     end
     tmp = data_dispatcher[""][name]
-    if tmp then publisher.dispatch(tmp,dataxml) end
+    if tmp then dispatch(tmp,dataxml) end
 
 
     --- emit last page if necessary
     -- current_pagestore_name is set when in SavePages and nil otherwise
     if page_initialized_p(current_pagenumber) and current_pagestore_name == nil then
         dothingsbeforeoutput()
-        local n = node.vpack(seiten[current_pagenumber].pagebox)
+        local n = node.vpack(pages[current_pagenumber].pagebox)
 
         tex.box[666] = n
         tex.shipout(666)
     end
 
     --- At this point, all pages are in the PDF
-    pdf.catalog = [[ /PageMode /UseOutlines ]]
-    pdf.info    = [[ /Creator	(speedata Publisher) /Producer(speedata Publisher, www.speedata.de) ]]
+
+    if pdf.setinfo then
+        pdf.setcatalog([[ /PageMode /UseOutlines ]])
+        pdf.setinfo([[ /Creator	(speedata Publisher) /Producer(speedata Publisher, www.speedata.de) ]])
+    else
+        pdf.catalog = [[ /PageMode /UseOutlines ]]
+        pdf.info = [[ /Creator (speedata Publisher) /Producer(speedata Publisher, www.speedata.de) ]]
+    end
 
     --- Now put the bookmarks in the pdf
     for _,v in ipairs(bookmarks) do
@@ -740,6 +666,7 @@ end
 ---     </data>
 ---
 --- is represented by this Lua table:
+---
 ---     XML = {
 ---       [1] = " "
 ---       [2] = {
@@ -782,14 +709,30 @@ function output_absolute_position( nodelist,x,y,allocate,area )
     n.width  = 0
     n.height = 0
     n.depth  = 0
-    local tail = node.tail(seiten[current_pagenumber].pagebox)
+    local tail = node.tail(pages[current_pagenumber].pagebox)
     tail.next = n
     n.prev = tail
 end
 
+--- Parameter       | Description
+--- ----------------|----------------------------------------------
+--- nodelist        | The box to be placed
+--- x               | The horizontal distance from the left edge in grid cells
+--- y               | The vertical distance form the top edge in grid cells
+--- allocate        | Mark these cells as 'occupied'
+--- area            | The area on which the object should be placed. Defaults to the page area.
+--- valign          |
+--- allocate_matrix | For image-shapes
+--- pagenumber      | The page the object should be placed
+--- keepposition    | Move the local cursor?
+--- grid            | The grid object. If not present, we use the default grid object
+function output_at( param )
+    __output_at(param.nodelist, param.x,param.y,param.allocate,param.area,param.valign,param.allocate_matrix,param.pagenumber,param.keepposition,param.grid)
+end
+
 --- Put the object (nodelist) on grid cell (x,y). If `allocate`=`true` then
 --- mark cells as occupied.
-function output_at( nodelist, x,y,allocate,area,valign,allocate_matrix,pagenumber,keepposition,grid)
+function __output_at( nodelist, x,y,allocate,area,valign,allocate_matrix,pagenumber,keepposition,grid)
     local outputpage = current_pagenumber
     if pagenumber then
         outputpage = pagenumber
@@ -814,7 +757,7 @@ function output_at( nodelist, x,y,allocate,area,valign,allocate_matrix,pagenumbe
         delta_y = delta_y - node.has_attribute(nodelist,att_shift_up)
     end
 
-    --- We don't necessarily ouput things on a page, we can output them in a virtual page, called _group_.
+    --- We don't necessarily output things on a page, we can output them in a virtual page, called _group_.
     if current_group then
         -- Put the contents of the nodelist into the current group
         local group = groups[current_group]
@@ -864,7 +807,7 @@ function output_at( nodelist, x,y,allocate,area,valign,allocate_matrix,pagenumbe
         n.width  = 0
         n.height = 0
         n.depth  = 0
-        local tail = node.tail(seiten[outputpage].pagebox)
+        local tail = node.tail(pages[outputpage].pagebox)
         tail.next = n
         n.prev = tail
 
@@ -881,17 +824,17 @@ function detect_pagetype(pagenumber)
     current_pagenumber = pagenumber
     local ret = nil
     for i=#masterpages,1,-1 do
-        local seitentyp = masterpages[i]
-        if seitentyp.name == nextpage then
-            log("Page of type %q created (%d) - pagetype requested",seitentyp.name or "<detect_pagetype>",pagenumber)
+        local pagetype = masterpages[i]
+        if pagetype.name == nextpage then
+            log("Page of type %q created (%d) - pagetype requested",pagetype.name or "<detect_pagetype>",pagenumber)
             nextpage = nil
-            return seitentyp.res
+            return pagetype.res
         end
 
 
-        if xpath.parse(nil,seitentyp.is_pagetype,seitentyp.ns) == true then
-            log("Page of type %q created (%d)",seitentyp.name or "<detect_pagetype>",pagenumber)
-            ret = seitentyp.res
+        if xpath.parse(nil,pagetype.is_pagetype,pagetype.ns) == true then
+            log("Page of type %q created (%d)",pagetype.name or "<detect_pagetype>",pagenumber)
+            ret = pagetype.res
             xpath.pop_state()
             current_pagenumber = cp
             return ret
@@ -905,17 +848,18 @@ end
 
 --- _Must_ be called before something can be put on the page. Looks for hooks to be run before page creation.
 function setup_page(pagenumber)
+    trace("setup_page")
     if current_group then return end
     local thispage
     if pagenumber then
         thispage = pagenumber
-        if seiten[pagenumber] ~= nil then
-            current_grid=seiten[pagenumber].grid
+        if pages[pagenumber] ~= nil then
+            current_grid=pages[pagenumber].grid
             return
         end
     else
         if page_initialized_p(current_pagenumber) then
-            current_grid=seiten[current_pagenumber].grid
+            current_grid=pages[current_pagenumber].grid
             return
         end
 
@@ -939,8 +883,8 @@ function setup_page(pagenumber)
         exit()
     end
     current_grid = current_page.grid
-    -- seiten[current_pagenumber] = nil
-    seiten[thispage] = current_page
+    -- pages[current_pagenumber] = nil
+    pages[thispage] = current_page
 
     local gridwidth, gridheight, nx, ny
     nx = options.gridcells_x
@@ -986,7 +930,7 @@ function setup_page(pagenumber)
             current_grid.positioning_frames[name] = {}
             local current_positioning_area = current_grid.positioning_frames[name]
             -- we evaluate now, because the attributes in PositioningFrame can be page dependent.
-            local tab  = publisher.dispatch(element_contents(j).layoutxml,dataxml)
+            local tab  = dispatch(element_contents(j).layoutxml,dataxml)
             for i,k in ipairs(tab) do
                 current_positioning_area[#current_positioning_area + 1] = element_contents(k)
             end
@@ -996,13 +940,13 @@ function setup_page(pagenumber)
     end
 
     local cp = current_page
-    current_page = seiten[thispage]
+    current_page = pages[thispage]
     if current_page.atpagecreation then
         pagebreak_impossible = true
         local cpn = current_pagenumber
         current_pagenumber = thispage
-        current_grid = seiten[thispage].grid
-        publisher.dispatch(current_page.atpagecreation,nil)
+        current_grid = pages[thispage].grid
+        dispatch(current_page.atpagecreation,nil)
         current_pagenumber = cpn
         pagebreak_impossible = false
     end
@@ -1010,7 +954,7 @@ function setup_page(pagenumber)
 
 end
 
---- Switch to the next frame in the given are.
+--- Switch to the next frame in the given area.
 function next_area( areaname )
     local current_framenumber = current_grid:framenumber(areaname)
     if not current_framenumber then
@@ -1028,10 +972,11 @@ end
 --- Switch to a new page and shipout the current page.
 --- This new page is only created if something is typeset on it.
 function new_page()
+    trace("publisher new_page")
     if pagebreak_impossible then
         return
     end
-    local thispage = seiten[current_pagenumber]
+    local thispage = pages[current_pagenumber]
     if not thispage then
         -- new_page() is called without anything on the page yet
         setup_page()
@@ -1045,7 +990,7 @@ function new_page()
 
     dothingsbeforeoutput()
 
-    local n = node.vpack(seiten[current_pagenumber].pagebox)
+    local n = node.vpack(pages[current_pagenumber].pagebox)
     if current_pagestore_name then
         local thispagestore = pagestore[current_pagestore_name]
         thispagestore[#thispagestore + 1] = n
@@ -1054,6 +999,7 @@ function new_page()
         tex.shipout(666)
     end
     current_pagenumber = current_pagenumber + 1
+    trace("page finished (new_page), setting current_pagenumber to %d",current_pagenumber)
 end
 
 --- Draw a background behind the rectangular (box) object.
@@ -1064,7 +1010,7 @@ function background( box, colorname )
     end
     local pdfcolorstring = colors[colorname].pdfstring
     local wd, ht, dp = sp_to_bp(box.width),sp_to_bp(box.height),sp_to_bp(box.depth)
-    n = node.new(whatsit_node,pdf_literal_node)
+    n = node.new("whatsit","pdf_literal")
     n.data = string.format("q %s 0 -%g %g %g re f Q",pdfcolorstring,dp,wd,ht + dp)
     n.mode = 0
     if node.type(box.id) == "hlist" then
@@ -1087,7 +1033,7 @@ function frame( box, colorname, width )
     local wd, ht, dp = sp_to_bp(box.width),sp_to_bp(box.height),sp_to_bp(box.depth)
     local w = width / factor -- width of stroke
     local hw = 0.5 * w -- half width of stroke
-    n = node.new(whatsit_node,pdf_literal_node)
+    n = node.new("whatsit","pdf_literal")
     n.data = string.format("q %s %g w -%g -%g %g %g re S Q",pdfcolorstring, w , hw ,dp + hw ,wd + w,ht + dp + w)
     n.mode = 0
     n.next = box
@@ -1096,28 +1042,51 @@ function frame( box, colorname, width )
     return n
 end
 
+-- collect all spot colors used so far to create proper page resources
+function usespotcolor(num)
+    used_spotcolors[num] = true
+end
+
+-- Set the PDF pageresources for the current page.
+function setpageresources()
+    local gstateresource = string.format(" /ExtGState << /GS0 %d 0 R /GS1 %d 0 R >>", GS_State_OP_On, GS_State_OP_Off)
+
+    if #used_spotcolors > 0 then
+        pdf.setpageresources("/ColorSpace << " .. spotcolors.getresource(used_spotcolors) .. " >>" .. gstateresource )
+    else
+        pdf.setpageresources(gstateresource)
+    end
+end
+
 --- Create a colored area. width and height are in scaled points.
 function box( width_sp,height_sp,colorname )
     local _width   = sp_to_bp(width_sp)
     local _height  = sp_to_bp(height_sp)
 
-    local paint = node.new(whatsit_node,pdf_literal_node)
-    paint.data = string.format("q %s 1 0 0 1 0 0 cm 0 0 %g -%g re f Q",colors[colorname].pdfstring,_width,_height)
+    local paint = node.new("whatsit","pdf_literal")
+    local colentry = colors[colorname]
+    if not colentry then
+        err("Color %q unknown, reverting to black",colorname )
+        colentry = colors["black"]
+    end
+    -- a spot color
+    paint.data = string.format("q %s 1 0 0 1 0 0 cm 0 0 %g -%g re f Q",colentry.pdfstring,_width,_height)
     paint.mode = 0
 
     local h,v
     local hglue,vglue
 
-    hglue = node.new(glue_node,0)
-    hglue.spec = node.new(glue_spec_node)
+    hglue = node.new("glue",0)
+    hglue.spec = node.new("glue_spec")
     hglue.spec.width         = 0
     hglue.spec.stretch       = 2^16
     hglue.spec.stretch_order = 3
     h = node.insert_after(paint,paint,hglue)
+
     h = node.hpack(h,width_sp,"exactly")
 
     vglue = node.new(glue_node,0)
-    vglue.spec = node.new(glue_spec_node)
+    vglue.spec = node.new("glue_spec")
     vglue.spec.width         = 0
     vglue.spec.stretch       = 2^16
     vglue.spec.stretch_order = 3
@@ -1129,18 +1098,22 @@ end
 
 --- After everything is ready for page shipout, we add debug output and crop marks if necessary
 function dothingsbeforeoutput(  )
-    local current_page = seiten[current_pagenumber]
+    local page_resources = {}
+    local current_page = pages[current_pagenumber]
     local r = current_page.grid
     local str
-    find_user_defined_whatsits(seiten[current_pagenumber].pagebox)
+    find_user_defined_whatsits(pages[current_pagenumber].pagebox)
     local firstbox
+
+    -- for spot colors, if necessary
+    setpageresources()
 
     -- White background on page. Todo: Make color customizable and background optional.
     local wd = sp_to_bp(current_page.width)
     local ht = sp_to_bp(current_page.height)
 
     local x = 0 + current_page.grid.extra_margin
-    local y = 0 + current_page.grid.extra_margin + current_page.grid.margin_top
+    local y = 0 + current_page.grid.extra_margin
 
     if options.trim then
         local trim_bp = sp_to_bp(options.trim)
@@ -1150,12 +1123,12 @@ function dothingsbeforeoutput(  )
         y = y - options.trim
     end
 
-    firstbox = node.new(whatsit_node,"pdf_literal")
+    firstbox = node.new("whatsit","pdf_literal")
     firstbox.data = string.format("q 0 0 0 0 k  1 0 0 1 0 0 cm %g %g %g %g re f Q",sp_to_bp(x), sp_to_bp(y),wd ,ht)
     firstbox.mode = 1
 
     if options.showgridallocation then
-        local lit = node.new(whatsit_node,"pdf_literal")
+        local lit = node.new("whatsit","pdf_literal")
         lit.mode = 1
         lit.data = r:draw_gridallocation()
 
@@ -1169,7 +1142,7 @@ function dothingsbeforeoutput(  )
     end
 
     if options.showgrid then
-        local lit = node.new(whatsit_node,"pdf_literal")
+        local lit = node.new("whatsit","pdf_literal")
         lit.mode = 1
         lit.data = r:draw_grid()
         if firstbox then
@@ -1182,7 +1155,7 @@ function dothingsbeforeoutput(  )
     end
     r:trimbox()
     if options.cutmarks then
-        local lit = node.new(whatsit_node,"pdf_literal")
+        local lit = node.new("whatsit","pdf_literal")
         lit.mode = 1
         lit.data = r:cutmarks()
         if firstbox then
@@ -1194,8 +1167,8 @@ function dothingsbeforeoutput(  )
         end
     end
     if firstbox then
-        local list_start = seiten[current_pagenumber].pagebox
-        seiten[current_pagenumber].pagebox = firstbox
+        local list_start = pages[current_pagenumber].pagebox
+        pages[current_pagenumber].pagebox = firstbox
         node.tail(firstbox).next = list_start
         list_start.prev = node.tail(firstbox)
     end
@@ -1294,7 +1267,7 @@ end
 
 -- To split the textblock in pieces
 local marker
-marker = node.new(whatsit_node,"user_defined")
+marker = node.new("whatsit","user_defined")
 marker.user_id = user_defined_marker
 marker.type = 100  -- type 100: "value is a number"
 marker.value = 1
@@ -1302,7 +1275,7 @@ marker.value = 1
 --- Convert `<b>`, `<u>` and `<i>` in text to publisher recognized elements.
 function parse_html( elt, parameter )
     local a = paragraph:new()
-    local bold,italic,underline
+    local bold,italic,underline,allowbreak
     if parameter then
         if parameter.underline then
             underline = 1
@@ -1313,6 +1286,7 @@ function parse_html( elt, parameter )
         if parameter.italic then
             italic = 1
         end
+        allowbreak = parameter.allowbreak
     end
 
     if elt[".__local_name"] then
@@ -1367,7 +1341,7 @@ function parse_html( elt, parameter )
                 local ai = node.new("action")
                 ai.action_type = 3
                 ai.data = string.format("/Subtype/Link/A<</Type/Action/S/URI/URI(%s)>>",elt.href)
-                local stl = node.new(whatsit_node,"pdf_start_link")
+                local stl = node.new("whatsit","pdf_start_link")
                 stl.action = ai
                 stl.width = -1073741824
                 stl.height = -1073741824
@@ -1380,7 +1354,7 @@ function parse_html( elt, parameter )
                         a:append(parse_html(elt[i]),{fontfamily = 0, bold = bold, italic = italic, underline = underline})
                     end
                 end
-                local enl = node.new(whatsit_node,"pdf_end_link")
+                local enl = node.new("whatsit","pdf_end_link")
                 a:append(enl)
             end
             return a
@@ -1392,9 +1366,9 @@ function parse_html( elt, parameter )
     for i=1,#elt do
         local typ = type(elt[i])
         if  typ == "string" or typ == "number" or typ == "boolean" then
-            a:append(elt[i],{fontfamily = 0, bold = bold, italic = italic, underline = underline })
+            a:append(elt[i],{fontfamily = 0, bold = bold, italic = italic, underline = underline, allowbreak = allowbreak })
         elseif typ == "table" then
-            a:append(parse_html(elt[i]),{fontfamily = 0, bold = bold, italic = italic, underline = underline})
+            a:append(parse_html(elt[i],{fontfamily = 0, bold = bold, italic = italic, underline = underline, allowbreak = allowbreak}))
         end
     end
 
@@ -1407,6 +1381,8 @@ function find_user_defined_whatsits( head )
     local fun
     while head do
         if head.id == vlist_node or head.id==hlist_node then
+            -- We need to recurse into the boxes. The colors used there must be kept.
+            -- Todo: use a variable that is global for this function. (do local x ; function ... end end)
             find_user_defined_whatsits(head.list)
         elseif head.id==whatsit_node then
             if head.subtype == user_defined_whatsit then
@@ -1454,17 +1430,31 @@ function find_user_defined_whatsits( head )
         end
         head = head.next
     end
+    return colors_used
 end
 
-rightskip = node.new(glue_spec_node)
+--- Node(list) creation
+--- -------------------
+
+
+rightskip = node.new("glue_spec")
 rightskip.width = 0
 rightskip.stretch = 1 * 2^16
 rightskip.stretch_order = 3
 
-leftskip = node.new(glue_spec_node)
+leftskip = node.new("glue_spec")
 leftskip.width = 0
 leftskip.stretch = 1 * 2^16
 leftskip.stretch_order = 3
+
+--- Return the larger glue(spec) values
+function bigger_glue_spec( a,b )
+    if a.stretch_order > b.stretch_order then return a end
+    if b.stretch_order > a.stretch_order then return b end
+    if a.stretch > b.stretch then return a end
+    if b.stretch > a.stretch then return b end
+    if a.width > b.width then return a else return b end
+end
 
 --- Create a `\hbox`. Return a nodelist. Parameter is one of
 ---
@@ -1474,6 +1464,7 @@ leftskip.stretch_order = 3
 --- * underline
 function mknodes(str,fontfamily,parameter)
     -- instance is the internal fontnumber
+    parameter = parameter or {}
     local instance
     local instancename
     local languagecode = parameter.languagecode or defaultlanguage
@@ -1506,7 +1497,7 @@ function mknodes(str,fontfamily,parameter)
 
     -- if it's an empty string, we make it a space character (experimental)
     if string.len(str) == 0 then
-        n = node.new(glyph_node)
+        n = node.new("glyph")
         n.char = 32
         n.font = instance
         n.subtype = 1
@@ -1516,34 +1507,38 @@ function mknodes(str,fontfamily,parameter)
         return n
     end
     local lastitemwasglyph
-
+    local newline = 10
+    local breakatspace = true
+    if parameter.allowbreak and not string.find(parameter.allowbreak, " ") then
+        breakatspace = false
+    end
     -- There is a string with utf8 chars
     for s in string.utfvalues(str) do
         local char = unicode.utf8.char(s)
-        -- If the next char is a newline (&amp;#x0A;) a \\ is inserted
-        if s == 10 then
+        -- If the next char is a newline (&#x0A;) a \\ is inserted
+        if s == newline then
             -- This is to enable hyphenation again. When we add a rule right after a word
             -- hyphenation is disabled. So we insert a penalty of 10k which should not do
             -- harm. Perhaps there is a better solution, but this seems to work OK.
             local dummypenalty
-            dummypenalty = node.new(penalty_node)
+            dummypenalty = node.new("penalty")
             dummypenalty.penalty = 10000
             head,last = node.insert_after(head,last,dummypenalty)
 
             local strut
-            strut = add_rule(nil,"head",{height = 8 * publisher.factor, depth = 3 * publisher.factor, width = 0 })
+            strut = add_rule(nil,"head",{height = 8 * factor, depth = 3 * factor, width = 0 })
             head,last = node.insert_after(head,last,strut)
 
             local p1,g,p2
-            p1 = node.new(penalty_node)
+            p1 = node.new("penalty")
             p1.penalty = 10000
 
-            g = node.new(glue_node)
-            g.spec = node.new(glue_spec_node)
+            g = node.new("glue")
+            g.spec = node.new("glue_spec")
             g.spec.stretch = 2^16
             g.spec.stretch_order = 2
 
-            p2 = node.new(penalty_node)
+            p2 = node.new("penalty")
             p2.penalty = -10000
 
             head,last = node.insert_after(head,last,p1)
@@ -1551,15 +1546,20 @@ function mknodes(str,fontfamily,parameter)
             head,last = node.insert_after(head,last,p2)
 
         elseif match(char,"^%s$") and last and last.id == glue_node and not node.has_attribute(last,att_tie_glue,1) then
-            -- double space, don't do anything
+            -- double space, use the bigger glue
+            local tmp = node.new(glue_spec_node)
+            tmp.width   = space
+            tmp.shrink  = shrink
+            tmp.stretch = stretch
+            last.spec = bigger_glue_spec(last.spec,tmp)
         elseif s == 160 then -- non breaking space U+00A0
-            n = node.new(penalty_node)
+            n = node.new("penalty")
             n.penalty = 10000
 
             head,last = node.insert_after(head,last,n)
 
-            n = node.new(glue_node)
-            n.spec = node.new(glue_spec_node)
+            n = node.new("glue")
+            n.spec = node.new("glue_spec")
             n.spec.width   = space
             n.spec.shrink  = shrink
             n.spec.stretch = stretch
@@ -1572,20 +1572,47 @@ function mknodes(str,fontfamily,parameter)
                 node.set_attribute(n,att_underline,1)
             end
             node.set_attribute(n,att_fontfamily,fontfamily)
+        elseif s == 173 then -- soft hyphen
+            -- The soft hyphen is used in server-mode /v0/format
+            n = node.new(penalty_node)
+            n.penalty = 10000
+            head, last = node.insert_after(head,last,n)
 
+            n = node.new(disc_node)
+            node.set_attribute(n,att_keep,1)
+            head, last = node.insert_after(head,last,n)
+
+            n = node.new(penalty_node)
+            n.penalty = 10000
+            head, last = node.insert_after(head,last,n)
+
+            n = node.new(glue_node)
+            n.spec = node.new(glue_spec_node)
+            head, last = node.insert_after(head,last,n)
         -- anchor is necessary. Otherwise à (C3A0) would match A0 - %s
         elseif match(char,"^%s$") then -- Space
-            -- ; and : should have the posibility to break easily if a space follows
-            if last and last.id == 37 and ( last.char == 58 or last.char == 59) then
-                n = node.new(penalty_node)
+            if breakatspace == false then
+                n = node.new("penalty")
+                n.penalty = 10000
+
+                head,last = node.insert_after(head,last,n)
+
+            end
+            -- ; and : should have the possibility to break easily if a space follows
+            if last and last.id == glyph_node and ( last.char == 58 or last.char == 59) then
+                n = node.new("penalty")
                 n.penalty = 0
                 head,last = node.insert_after(head,last,n)
             end
-            n = node.new(glue_node)
-            n.spec = node.new(glue_spec_node)
+            n = node.new("glue")
+            n.spec = node.new("glue_spec")
             n.spec.width   = space
             n.spec.shrink  = shrink
             n.spec.stretch = stretch
+
+            if breakatspace == false then
+                node.set_attribute(n,att_tie_glue,1)
+            end
 
             if parameter.underline == 1 then
                 node.set_attribute(n,att_underline,1)
@@ -1595,14 +1622,14 @@ function mknodes(str,fontfamily,parameter)
             head,last = node.insert_after(head,last,n)
         else
             -- A regular character?!?
-            n = node.new(glyph_node)
+            n = node.new("glyph")
             n.font = instance
             n.subtype = 1
             n.char = s
             n.lang = languagecode
             n.uchyph = 1
-            n.left = tex.lefthyphenmin
-            n.right = tex.righthyphenmin
+            n.left = parameter.left or tex.lefthyphenmin
+            n.right = parameter.right or tex.righthyphenmin
             node.set_attribute(n,att_fontfamily,fontfamily)
             if parameter.bold == 1 then
                 node.set_attribute(n,att_bold,1)
@@ -1613,19 +1640,27 @@ function mknodes(str,fontfamily,parameter)
             if parameter.underline == 1 then
                 node.set_attribute(n,att_underline,1)
             end
-            if last and last.id == 37 then
+            if last and last.id == glyph_node then
                 lastitemwasglyph = true
             end
+
             head,last = node.insert_after(head,last,n)
-            -- We have a character but some characters must be treated in a special
-            -- way.
-            -- Hyphens must be sepearated from words:
+            -- Some characters must be treated in a special way.
+            -- Hyphens must be separated from words:
             if ( n.char == 45 or n.char == 8211) and lastitemwasglyph then
                 local pen = node.new("penalty")
                 pen.penalty = 10000
                 head = node.insert_before(head,last,pen)
-                local disc = node.new(disc_node)
+                local disc = node.new("disc")
                 head,last = node.insert_after(head,last,disc)
+                local g = node.new(glue_node)
+                g.spec = node.new(glue_spec_node)
+                head,last = node.insert_after(head,last,g)
+            elseif parameter.allowbreak and string.find(parameter.allowbreak, char,1,true) then
+                -- allowbreak lists characters where the publisher may break lines
+                local pen = node.new("penalty")
+                pen.penalty = 0
+                head,last = node.insert_after(head,last,pen)
             end
         end
     end
@@ -1635,17 +1670,15 @@ function mknodes(str,fontfamily,parameter)
         warning("No head found")
         return node.new("hlist")
     end
+
     return head
 end
 
 -- head_or_tail = "head" oder "tail" (default: tail). Return new head (perhaps same as nodelist)
 function add_rule( nodelist,head_or_tail,parameters)
     parameters = parameters or {}
-    -- if parameters.height == nil then parameters.height = -1073741824 end
-    -- if parameters.width  == nil then parameters.width  = -1073741824 end
-    -- if parameters.depth  == nil then parameters.depth  = -1073741824 end
 
-    local n=node.new(rule_node)
+    local n=node.new("rule")
     n.width  = parameters.width
     n.height = parameters.height
     n.depth  = parameters.depth
@@ -1723,8 +1756,8 @@ end
 function add_glue( nodelist,head_or_tail,parameter)
     parameter = parameter or {}
 
-    local n=node.new(glue_node, parameter.subtype or 0)
-    n.spec = node.new(glue_spec_node)
+    local n=node.new("glue", parameter.subtype or 0)
+    n.spec = node.new("glue_spec")
     n.spec.width         = parameter.width
     n.spec.stretch       = parameter.stretch
     n.spec.stretch_order = parameter.stretch_order
@@ -1753,11 +1786,14 @@ function make_glue( parameter )
     return n
 end
 
-function finish_par( nodelist,hsize )
+function finish_par( nodelist,hsize,parameters )
     assert(nodelist)
     node.slide(nodelist)
-    lang.hyphenate(nodelist)
-    local n = node.new(penalty_node)
+
+    if not parameters.disable_hyphenation then
+        lang.hyphenate(nodelist)
+    end
+    local n = node.new("penalty")
     n.penalty = 10000
     local last = node.slide(nodelist)
 
@@ -1766,15 +1802,17 @@ function finish_par( nodelist,hsize )
     last = n
 
     n = node.kerning(nodelist)
-    n = node.ligaturing(n)
+    -- FIXME: why do I call node.ligaturing()? I don't have any ligatures anyway
+    -- n = node.ligaturing(n)
 
     n,last = add_glue(n,"tail",{ subtype = 15, width = 0, stretch = 2^16, stretch_order = 2})
 end
 
-function fix_justification( nodelist,textformat,parent)
+function fix_justification( nodelist,alignment,parent)
     local head = nodelist
     while head do
         if head.id == 0 then -- hlist
+
             -- we are on a line now. We assume that the spacing needs correction.
             -- The goal depends on the current line (parshape!)
             local goal,_,_ = node.dimensions(head.glue_set, head.glue_sign, head.glue_order, head.head)
@@ -1792,37 +1830,22 @@ function fix_justification( nodelist,textformat,parent)
             -- because this list is copied in paragraph:format()
             local spec_new
 
-            for n in node.traverse_id(10,head.head) do
-                -- calculate the font before this id.
-                if n.prev and n.prev.id == 37 then -- glyph
-                    font_before_glue = n.prev.font
-                elseif n.prev and n.prev.id == 7 then -- disc
-                    local font_node = n.prev
-                    while font_node.id ~= 37 do
-                        font_node = font_node.prev
+            for n in node.traverse(head.head) do
+                if n.id == glyph_node then
+                    font_before_glue = n.font
+                elseif n.id == glue_node then
+                    if n.subtype==0 and font_before_glue and n.spec.width > 0 and head.glue_sign == 1 then
+                        local fonttable = font.fonts[font_before_glue]
+                        if not fonttable then fonttable = font.fonts[1] err("Some font not found") end
+                        spec_new = node.new("glue_spec")
+                        spec_new.width = fonttable.parameters.space
+                        spec_new.shrink_order = head.glue_order
+                        n.spec = spec_new
                     end
-                    if font_node then
-                        font_before_glue = font_node.font
-                    else
-                        font_before_glue = nil
-                    end
-                else
-                    font_before_glue = nil
-                end
-
-                -- n.spec.width > 0 because we insert a glue after a hyphen in
-                -- compound words such as "mailing-[glue]list" and that glue's width is 0pt
-                if n.subtype==0 and font_before_glue and n.spec.width > 0 and head.glue_sign == 1 then
-                    local fonttable = font.fonts[font_before_glue]
-                    if not fonttable then fonttable = font.fonts[1] err("Some font not found") end
-                    spec_new = node.new("glue_spec")
-                    spec_new.width = fonttable.parameters.space
-                    spec_new.shrink_order = head.glue_order
-                    n.spec = spec_new
                 end
             end
 
-            if textformat == "rightaligned" then
+            if alignment == "rightaligned" then
 
                 local list_start = head.head
                 local rightskip_node = node.tail(head.head)
@@ -1846,7 +1869,7 @@ function fix_justification( nodelist,textformat,parent)
                 head.head = node.insert_before(head.head,head.head,leftskip_node)
             end
 
-            if textformat == "centered" then
+            if alignment == "centered" then
                 local list_start = head.head
                 local rightskip_node = node.tail(head.head)
                 local parfillskip
@@ -1858,7 +1881,9 @@ function fix_justification( nodelist,textformat,parent)
                 local tmp = rightskip_node.prev
                 while tmp and ( tmp.id == glue_node or tmp.id == penalty_node ) do
                     tmp = tmp.prev
-                    head.head = node.remove(head.head,tmp.next)
+                    if tmp then
+                        head.head = node.remove(head.head,tmp.next)
+                    end
                 end
 
                 local wd = node.dimensions(head.glue_set, head.glue_sign, head.glue_order,head.head)
@@ -1869,7 +1894,7 @@ function fix_justification( nodelist,textformat,parent)
                 head.head = node.insert_before(head.head,head.head,leftskip_node)
             end
         elseif head.id == 1 then -- vlist
-            fix_justification(head.head,textformat,head)
+            fix_justification(head.head,alignment,head)
         end
         head = head.next
     end
@@ -1879,7 +1904,7 @@ end
 function do_linebreak( nodelist,hsize,parameters )
     assert(nodelist,"No nodelist found for line breaking.")
     parameters = parameters or {}
-    finish_par(nodelist,hsize)
+    finish_par(nodelist,hsize,parameters)
 
     local pdfignoreddimen
     pdfignoreddimen    = -65536000
@@ -1933,8 +1958,8 @@ function do_linebreak( nodelist,hsize,parameters )
 end
 
 function create_empty_hbox_with_width( wd )
-    local n=node.new(glue_node,0)
-    n.spec = node.new(glue_spec_node)
+    local n=node.new("glue")
+    n.spec = node.new("glue_spec")
     n.spec.width         = 0
     n.spec.stretch       = 2^16
     n.spec.stretch_order = 3
@@ -1948,7 +1973,7 @@ do
     -- number of the anchor, so it can be used in a pdf link or an outline.
     function mkdest()
         destcounter = destcounter + 1
-        local d = node.new(whatsit_node,"pdf_dest")
+        local d = node.new("whatsit","pdf_dest")
         d.named_id = 0
         d.dest_id = destcounter
         d.dest_type = 3
@@ -1966,7 +1991,7 @@ function mkbookmarknodes(level,open_p,title)
     title = title or "no title for bookmark given"
 
     n,counter = mkdest()
-    local udw = node.new(whatsit_node,"user_defined")
+    local udw = node.new("whatsit","user_defined")
     udw.user_id = user_defined_bookmark
     udw.type = 115 -- a string
     udw.value = string.format("%d+%d+%d+%s",level,openclosed,counter,title)
@@ -1984,7 +2009,7 @@ function boxit( box )
     local ht = (box.height + box.depth)  / factor - rule_width
     local dp = box.depth                 / factor - rule_width / 2
 
-    local wbox = node.new(whatsit_node,"pdf_literal")
+    local wbox = node.new("whatsit","pdf_literal")
     wbox.data = string.format("q 0.1 G %g w %g %g %g %g re s Q", rule_width, rule_width / 2, -dp, -wd, ht)
     wbox.mode = 0
     -- Draw box at the end so its contents gets "below" it.
@@ -1992,6 +2017,612 @@ function boxit( box )
     tmp.next = wbox
     return box
 end
+
+-- We have an array of color names to be used in attributes. Every color needs to get registered!
+function register_color( name )
+    colortable[#colortable + 1] = name
+    return #colortable
+end
+
+-- color is an integer
+function set_color_if_necessary( nodelist,color )
+    if not color then return nodelist end
+
+    local colorname
+    if color == -1 then
+        colorname = "black"
+    else
+        colorname = colortable[color]
+    end
+
+    local colstart = node.new("whatsit","pdf_colorstack")
+    colstart.data  = colors[colorname].pdfstring
+    if status.luatex_version < 79 then
+        colstart.cmd = 1
+    else
+        colstart.command = 1
+    end
+    colstart.stack = 0
+    colstart.next = nodelist
+    nodelist.prev = colstart
+
+    local colstop  = node.new("whatsit","pdf_colorstack")
+    colstop.data  = ""
+    if status.luatex_version < 79 then
+        colstop.cmd = 2
+    else
+        colstop.command = 2
+    end
+    colstop.stack = 0
+    local last = node.tail(nodelist)
+    last.next = colstop
+    colstop.prev = last
+
+    return colstart
+end
+
+function set_fontfamily_if_necessary(nodelist,fontfamily)
+    -- todo: test this FIXME
+    -- if fontfamily == 0 then return end
+    local fam
+    while nodelist do
+        if nodelist.id==0 or nodelist.id==1 then
+            set_fontfamily_if_necessary(nodelist.list,fontfamily)
+        else
+            fam = node.has_attribute(nodelist,att_fontfamily)
+            if fam == 0 or ( fam == nil and nodelist.id == 2) then
+                node.set_attribute(nodelist,att_fontfamily,fontfamily)
+            end
+        end
+        nodelist=nodelist.next
+    end
+end
+
+function set_sub_supscript( nodelist,script )
+    for glyf in node.traverse_id(glyph_node,nodelist) do
+        node.set_attribute(glyf,att_script,script)
+    end
+end
+
+function break_url( nodelist )
+    local p
+
+    local slash = string.byte("/")
+    for n in node.traverse_id(glyph_node,nodelist) do
+        p = node.new("penalty")
+
+        if n.char == slash then
+            p.penalty=-50
+        else
+            p.penalty=-5
+        end
+        p.next = n.next
+        n.next = p
+        p.prev = n
+    end
+    return nodelist
+end
+
+function colorbar( wd,ht,dp,color )
+    local colorname = color
+    if not colorname or colorname == "" then
+        colorname = "black"
+    end
+    if not colors[colorname] then
+        err("Color %q not found",color)
+        colorname = "black"
+    end
+
+    local rule_start = node.new("whatsit","pdf_literal")
+    rule_start.mode = 0
+    rule_start.data = "q "..colors[colorname].pdfstring .. string.format(" 0 0 %g %g  re f Q ",sp_to_bp(wd),sp_to_bp(ht))
+
+    local h = node.hpack(rule_start)
+    h.width = wd
+    h.depth = dp
+    h.height = ht
+    return h
+end
+
+--- Rotate a text on a given angle.
+function rotate( nodelist,angle )
+    local wd,ht = nodelist.width, nodelist.height + nodelist.depth
+    nodelist.width = 0
+    nodelist.height = 0
+    nodelist.depth = 0
+    local angle_rad = math.rad(angle)
+    local sin = math.round(math.sin(angle_rad),3)
+    local cos = math.round(math.cos(angle_rad),3)
+    local q = node.new("whatsit","pdf_literal")
+    q.mode = 0
+    local shift_x = math.round(math.min(0,math.sin(angle_rad) * sp_to_bp(ht)) + math.min(0,     math.cos(angle_rad) * sp_to_bp(wd)),3)
+    local shift_y = math.round(math.max(0,math.sin(angle_rad) * sp_to_bp(wd)) + math.max(0,-1 * math.cos(angle_rad) * sp_to_bp(ht)),3)
+    q.data = string.format("q %g %g %g %g %g %g cm",cos,sin, -1 * sin,cos, -1 * shift_x ,-1 * shift_y )
+    q.next = nodelist
+    local tail = node.tail(nodelist)
+    local Q = node.new("whatsit","pdf_literal")
+    Q.data = "Q"
+    tail.next = Q
+    local tmp = node.vpack(q)
+    tmp.width  = math.abs(wd * cos) + math.abs(ht * math.cos(math.rad(90 - angle)))
+    tmp.height = math.abs(ht * math.sin(math.rad(90 - angle))) + math.abs(wd * sin)
+    tmp.depth = 0
+    return tmp
+end
+
+--- Make a string XML safe
+function xml_escape( str )
+    local replace = {
+        [">"] = "&gt;",
+        ["<"] = "&lt;",
+        ["\""] = "&quot;",
+        ["&"] = "&amp;",
+    }
+    local ret = str.gsub(str,".",replace)
+    return ret
+end
+
+--- See commands#save_dataset() for  documentation on the data structure for `xml_element`.
+function xml_to_string( xml_element, level )
+    level = level or 0
+    local str = ""
+    str = str .. string.rep(" ",level) .. "<" .. xml_element[".__local_name"]
+    for k,v in pairs(xml_element) do
+        if type(k) == "string" and not k:match("^%.") then
+            str = str .. string.format(" %s=%q", k,v)
+        end
+    end
+    str = str .. ">\n"
+    for i,v in ipairs(xml_element) do
+        str = str .. xml_to_string(v,level + 1)
+    end
+    str = str .. string.rep(" ",level) .. "</" .. xml_element[".__local_name"] .. ">\n"
+    return str
+end
+
+--- Hyphenation and language handling
+--- ---------------------------------
+
+--- We map from symbolic names to (part of) file names. The hyphenation pattern files are
+--- in the format `hyph-XXX.pat.txt` and we need to find out that `XXX` part.
+language_mapping = {
+    ["Czech"]                        = "cs",
+    ["Danish"]                       = "da",
+    ["Dutch"]                        = "nl",
+    ["Englisch (Great Britan)"]      = "en_GB",
+    ["Englisch (USA)"]               = "en_US",
+    ["Finnish"]                      = "fi",
+    ["French"]                       = "fr",
+    ["German"]                       = "de",
+    ["Greek"]                        = "el",
+    ["Hungarian"]                    = "hu",
+    ["Italian"]                      = "it",
+    ["Norwegian Bokmål"]             = "nb",
+    ["Norwegian Nynorsk"]            = "nn",
+    ["Polish"]                       = "pt",
+    ["Portuguese"]                   = "pt",
+    ["Russian"]                      = "ru",
+    ["Serbian"]                      = "sr",
+    ["Spanish"]                      = "es",
+    ["Swedish"]                      = "sv",
+    ["Turkish"]                      = "tr",
+}
+
+--- Supported language names. Not all are currently available from the publisher
+---
+---     af, Afrikaans - Afrikaans
+---     as, Assamese - Assamesisch
+---     bg, Bulgarian - Bulgarisch
+---     ca, Catalan - Katalanisch
+---     cs, Czech - Tschechisch
+---     cy, Welsh - Kymrisch
+---     da, Danish - Dänisch
+---     de, German - Deutsch
+---     el, Greek - Neugriechisch
+---     en, English - Englisch
+---     eo, Esperanto - Esperanto
+---     es, Spanish - Spanisch
+---     et, Estonian - Estnisch
+---     eu, Basque - Baskisch
+---     fi, Finnish - Finnisch
+---     fr, French - Französisch
+---     ga, Irish - Irisch
+---     gl, Galician - Galicisch
+---     gu, Gujarati - Gujarati
+---     hi, Hindi - Hindi
+---     hr, Croatian - Kroatisch
+---     hu, Hungarian - Ungarisch
+---     hy, Armenian - Armenisch
+---     ia, Interlingua - Interlingua
+---     id, Indonesian - Bahasa Melayu
+---     is, Icelandic - Isländisch
+---     it, Italian - Italienisch
+---     ku, Kurdish - Kurdisch
+---     kn, Kannada - Kannada
+---     la, Latin - Latein
+---     lo, Lao - Laotisch
+---     lt, Lithuanian - Litauisch
+---     ml, Malayalam - Malayalam
+---     lv, Latvian - Lettisch
+---     ml, Malayalam - Malayalam
+---     mn, Mongolian - Mongolisch
+---     mr, Marathi - Marathi
+---     nb, Norwegian Bokmål - Bokmål
+---     nl, Dutch - Niederländisch
+---     nn, Norwegian Nynorsk - Nynorsk
+---     or, Oriya - Oriya
+---     pa, Panjabi - Pandschabi
+---     pl, Polish - Polnisch
+---     pt, Portuguese - Portugiesisch
+---     ro, Romanian - Rumänisch
+---     ru, Russian - Russisch
+---     sa, Sanskrit - Sanskrit
+---     sk, Slovak - Slowakisch
+---     sl, Slovenian - Slowenisch
+---     sr, Serbian - Serbisch
+---     sv, Swedish - Schwedisch
+---     ta, Tamil - Tamil
+---     te, Telugu - Telugu
+---     tk, Turkmen - Turkmenisch
+---     tr, Turkish - Türkisch
+---     uk, Ukrainian - Ukrainisch
+---     zh, Chinese - Chinesisch
+
+
+language_filename = {
+    ["af"]    = "af",
+    ["as"]    = "as",
+    ["bg"]    = "bg",
+    ["ca"]    = "ca",
+    ["cs"]    = "cs",
+    ["cy"]    = "cy",
+    ["da"]    = "da",
+    ["de"]    = "de-1996",
+    ["el"]    = "el-monoton",
+    ["en"]    = "en-gb",
+    ["en_GB"] = "en-gb",
+    ["en_US"] = "en-us",
+    ["eo"]    = "eo",
+    ["es"]    = "es",
+    ["et"]    = "et",
+    ["eu"]    = "eu",
+    ["fi"]    = "fi",
+    ["fr"]    = "fr",
+    ["ga"]    = "ga",
+    ["gl"]    = "gl",
+    ["gu"]    = "gu",
+    ["hi"]    = "hi",
+    ["hr"]    = "hr",
+    ["hu"]    = "hu",
+    ["hy"]    = "hy",
+    ["ia"]    = "ia",
+    ["id"]    = "id",
+    ["is"]    = "is",
+    ["it"]    = "it",
+    ["ku"]    = "kmr",
+    ["kn"]    = "kn",
+    ["la"]    = "la",
+    ["lo"]    = "lo",
+    ["lt"]    = "lt",
+    ["ml"]    = "ml",
+    ["lv"]    = "lv",
+    ["ml"]    = "ml",
+    ["mn"]    = "mn-cyrl",
+    ["mr"]    = "mr",
+    ["nb"]    = "nb",
+    ["nl"]    = "nl",
+    ["nn"]    = "nn",
+    ["or"]    = "or",
+    ["pa"]    = "pa",
+    ["pl"]    = "pl",
+    ["pt"]    = "pt",
+    ["ro"]    = "ro",
+    ["ru"]    = "ru",
+    ["sa"]    = "sa",
+    ["sk"]    = "sk",
+    ["sl"]    = "sl",
+    ["sr"]    = "sr",
+    ["sv"]    = "sv",
+    ["ta"]    = "ta",
+    ["te"]    = "te",
+    ["tk"]    = "tk",
+    ["tr"]    = "tr",
+    ["uk"]    = "uk",
+    ["zh"]    = "zh-latn",
+}
+
+--- Once a hyphenation pattern file is loaded, we only need the _id_ of it. This is stored in the
+--- `languages` table. Key is the filename part (such as `de-1996`) and the value is the internal
+--- language id.
+languages = {}
+languages_id_lang = {}
+
+--- Return a lang object
+function get_language(id_or_locale_or_name)
+    local num = tonumber(id_or_locale_or_name)
+    if num then
+        return languages_id_lang[num]
+    end
+    local locale = id_or_locale_or_name
+
+    if language_mapping[id_or_locale_or_name] then
+        locale = language_mapping[id_or_locale_or_name]
+    end
+    if languages[locale] then
+        return languages[locale]
+    end
+
+    local filename_part
+    if language_filename[locale] then
+        filename_part = language_filename[locale]
+    else
+        local lang, _ = unpack(string.explode(locale,"_"))
+        if language_filename[lang] then
+            filename_part = language_filename[lang]
+        end
+    end
+    if not filename_part then
+        err("Can't find hyphenation patterns for language %s",tostring(locale))
+        return 0
+    end
+
+    local filename = string.format("hyph-%s.pat.txt",filename_part)
+    log("Loading hyphenation patterns %q.",filename)
+    local path = kpse.find_file(filename)
+    local pattern_file = io.open(path)
+    local pattern = pattern_file:read("*all")
+    pattern_file:close()
+
+    local l = lang.new()
+    l:patterns(pattern)
+    local id = l:id()
+    log("Language id: %d",id)
+    local ret = { id = id, l = l }
+    languages_id_lang[id] = ret
+    languages[locale] = ret
+    return ret
+end
+
+--- The language name is something like `German` or a locale.
+function get_languagecode( locale_or_name )
+    local tmp = get_language(locale_or_name)
+    return tmp.id
+end
+
+function set_mainlanguage( mainlanguage )
+    log("Setting default language to %q",mainlanguage or "?")
+    defaultlanguage = get_languagecode(mainlanguage)
+end
+
+--- Misc
+--- --------
+function set_pageformat( wd,ht )
+    options.pagewidth    = wd
+    options.pageheight  = ht
+    tex.pdfpagewidth =  wd
+    tex.pdfpageheight = ht
+    -- why the + 2cm? is this for the trim-/art-/bleedbox? FIXME: document
+    tex.pdfpagewidth  = tex.pdfpagewidth   + tex.sp("2cm")
+    tex.pdfpageheight = tex.pdfpageheight  + tex.sp("2cm")
+
+    -- necessary? FIXME: check if necessary.
+    tex.hsize = wd
+    tex.vsize = ht
+end
+
+-- Return remaining height (sp), first row, last row
+function get_remaining_height(area,allocate)
+    local cols = current_grid:number_of_columns(area)
+    local startcol = 1
+    local row,firstrow,lastrow,maxrows
+    firstrow = current_grid:current_row(area)
+    maxrows  = current_grid:number_of_rows(area)
+    if allocate == "auto" then
+        return (maxrows - firstrow + 1)  * current_grid.gridheight, firstrow, nil
+    end
+
+    if not current_grid:fits_in_row_area(startcol,cols,firstrow,area) then
+        while firstrow <= maxrows do
+            if current_grid:fits_in_row_area(startcol,cols,firstrow,area) then
+                break
+            end
+            firstrow = firstrow + 1
+        end
+    end
+
+    row = firstrow
+
+    while current_grid:fits_in_row_area(startcol,cols,row,area) and row <= maxrows do
+        row = row + 1
+    end
+
+    lastrow = row
+
+    while row <= maxrows do
+        if current_grid:fits_in_row_area(startcol,cols,row,area) then
+            return ( lastrow - firstrow)  * current_grid.gridheight, firstrow, firstrow
+        end
+        row = row + 1
+    end
+    return ( lastrow - firstrow)  * current_grid.gridheight, firstrow, nil
+
+end
+
+function next_row(rownumber,areaname,rows)
+    local grid = current_grid
+
+    if rownumber then
+        grid:set_current_row(rownumber,areaname)
+        return
+    end
+
+    local current_row
+    current_row = grid:find_suitable_row(1,grid:number_of_columns(areaname),rows,areaname)
+    if not current_row then
+        next_area(areaname)
+        setup_page()
+        grid = current_page.grid
+        grid:set_current_row(1)
+    else
+        grid:set_current_row(current_row + rows - 1,areaname)
+        grid:set_current_column(1,areaname)
+    end
+end
+
+function empty_block()
+    local r = node.new("hlist")
+    r.width = 0
+    r.height = 0
+    r.depth = 0
+    local v = node.vpack(r)
+    trace("empty_block")
+    return v
+end
+
+
+function emergency_block()
+    local r = node.new("rule")
+    r.width = 5 * 2^16
+    r.height = 5 * 2^16
+    r.depth = 0
+    local v = node.vpack(r)
+    trace("emergency_block")
+    return v
+end
+
+
+
+--- Defaults
+--- --------
+
+--- This function is only called once from `dothings()` during startup phase. We define
+--- a family with regular, bold, italic and bolditalic font with size 10pt (we always
+--- measure font size in dtp points)
+function define_default_fontfamily()
+    local fam={
+        size         = 10 * factor,
+        baselineskip = 12 * factor,
+        scriptsize   = 10 * factor * 0.8,
+        scriptshift  = 10 * factor * 0.3,
+    }
+    local ok,tmp
+    ok,tmp = fonts.make_font_instance("TeXGyreHeros-Regular",fam.size)
+    fam.normal = tmp
+    ok,tmp = fonts.make_font_instance("TeXGyreHeros-Regular",fam.scriptsize)
+    fam.normalscript = tmp
+
+    ok,tmp = fonts.make_font_instance("TeXGyreHeros-Bold",fam.size)
+    fam.bold = tmp
+    ok,tmp = fonts.make_font_instance("TeXGyreHeros-Bold",fam.scriptsize)
+    fam.boldscript = tmp
+
+    ok,tmp = fonts.make_font_instance("TeXGyreHeros-Italic",fam.size)
+    fam.italic = tmp
+    ok,tmp = fonts.make_font_instance("TeXGyreHeros-Italic",fam.scriptsize)
+    fam.italicscript = tmp
+
+    ok,tmp = fonts.make_font_instance("TeXGyreHeros-BoldItalic",fam.size)
+    fam.bolditalic = tmp
+    ok,tmp = fonts.make_font_instance("TeXGyreHeros-BoldItalic",fam.scriptsize)
+    fam.bolditalicscript = tmp
+    fonts.lookup_fontfamily_number_instance[#fonts.lookup_fontfamily_number_instance + 1] = fam
+    fonts.lookup_fontfamily_name_number["text"]=#fonts.lookup_fontfamily_number_instance
+end
+
+
+--- Image handling
+--- --------------
+
+function set_image_length(len,width_or_height)
+    if len == nil or len == "auto" then
+        return nil
+    elseif len == "100%" and width_or_height == "width" then
+        return xpath.get_variable("__maxwidth") * current_grid.gridwidth
+    elseif tonumber(len) then
+        if width_or_height == "width" then
+            return len * current_grid.gridwidth
+        else
+            return len * current_grid.gridheight
+        end
+    else
+        return tex.sp(len)
+    end
+end
+
+
+function calculate_image_width_height( image, width,height,minwidth,minheight,maxwidth, maxheight )
+    -- from http://www.w3.org/TR/CSS2/visudet.html#min-max-widths:
+    --
+    -- Constraint Violation                                                           Resolved Width                      Resolved Height
+    -- ===================================================================================================================================================
+    --  1 none                                                                        w                                   h
+    --  2 w > max-width                                                               max-width                           max(max-width * h/w, min-height)
+    --  3 w < min-width                                                               min-width                           min(min-width * h/w, max-height)
+    --  4 h > max-height                                                              max(max-height * w/h, min-width)    max-height
+    --  5 h < min-height                                                              min(min-height * w/h, max-width)    min-height
+    --  6 (w > max-width) and (h > max-height), where (max-width/w ≤ max-height/h)    max-width                           max(min-height, max-width * h/w)
+    --  7 (w > max-width) and (h > max-height), where (max-width/w > max-height/h)    max(min-width, max-height * w/h)    max-height
+    --  8 (w < min-width) and (h < min-height), where (min-width/w ≤ min-height/h)    min(max-width, min-height * w/h)    min-height
+    --  9 (w < min-width) and (h < min-height), where (min-width/w > min-height/h)    min-width                           min(max-height, min-width * h/w)
+    -- 10 (w < min-width) and (h > max-height)                                        min-width                           max-height
+    -- 11 (w > max-width) and (h < min-height)                                        max-width                           min-height
+
+    if width < minwidth and height > maxheight then
+        -- w("10")
+        width = minwidth
+        height = maxheight
+    elseif width > maxwidth and height < minheight then
+        -- w("11")
+        width = maxwidth
+        height = minheight
+    elseif width > maxwidth and height > maxheight and maxwidth / width <= maxheight / height then
+        -- w("6")
+        width = maxwidth
+        height = math.max(minheight, maxwidth * height/width)
+    elseif width > maxwidth and height > maxheight and maxwidth / width > maxheight / height then
+        -- w("7")
+        width = math.max(minwidth,maxheight * width / height)
+        height = maxheight
+    elseif width < minwidth and height < minheight and minwidth / width <= minheight / height then
+        -- w("8")
+        width  = math.min(maxwidth,minheight * width / height)
+        height = minheight
+    elseif width < minwidth and height < minheight and minwidth / width > minheight / height then
+        -- w("9")
+        width = minwidth
+        height = math.min(maxheight,minwidth * height / width)
+    elseif width > maxwidth then
+        -- w("2")
+        width = maxwidth
+        height = math.max(maxwidth * height / width, minheight )
+    elseif width < minwidth then
+        -- w("3")
+        width = minwidth
+        height = math.min(minwidth * height / width, maxheight)
+    elseif height > maxheight then
+        -- w("4")
+        width = math.max(maxheight * width / height, minwidth)
+        height = maxheight
+    elseif height < minheight then
+        -- w("5")
+        width = math.min(minheight * width / height, maxwidth)
+        height = minheight
+    end
+
+    -- If one of height or width is given, the other one should
+    -- be adjusted to keep the aspect ratio
+    if height == image.height then
+        if width ~= image.width then
+            height = height * width / image.width
+        end
+    elseif width == image.width then
+        if height ~= image.height then
+            width = width *  height / image.height
+        end
+    end
+    return width, height
+end
+
 
 local images = {}
 function new_image( filename, page, box)
@@ -2158,432 +2789,12 @@ function imageinfo( filename,page,box )
     return images[new_name]
 end
 
-function set_color_if_necessary( nodelist,color )
-    if not color then return nodelist end
-
-    local colorname
-    if color == -1 then
-        colorname = "Schwarz"
-    else
-        colorname = colortable[color]
-    end
-
-    local colstart = node.new(whatsit_node,39)
-    colstart.data  = colors[colorname].pdfstring
-    if status.luatex_version < 79 then
-        colstart.cmd = 1
-    else
-        colstart.command = 1
-    end
-    colstart.stack = 0
-    colstart.next = nodelist
-    nodelist.prev = colstart
-
-    local colstop  = node.new(whatsit_node,39)
-    colstop.data  = ""
-    if status.luatex_version < 79 then
-        colstop.cmd = 2
-    else
-        colstop.command = 2
-    end
-    colstop.stack = 0
-    local last = node.tail(nodelist)
-    last.next = colstop
-    colstop.prev = last
-
-    return colstart
-end
-
-function set_fontfamily_if_necessary(nodelist,fontfamily)
-    -- todo: test this FIXME
-    -- if fontfamily == 0 then return end
-    local fam
-    while nodelist do
-        if nodelist.id==0 or nodelist.id==1 then
-            set_fontfamily_if_necessary(nodelist.list,fontfamily)
-        else
-            fam = node.has_attribute(nodelist,att_fontfamily)
-            if fam == 0 or ( fam == nil and nodelist.id == 2) then
-                node.set_attribute(nodelist,att_fontfamily,fontfamily)
-            end
-        end
-        nodelist=nodelist.next
-    end
-end
-
-function set_sub_supscript( nodelist,script )
-    for glyf in node.traverse_id(glyph_node,nodelist) do
-        node.set_attribute(glyf,att_script,script)
-    end
-end
-
-function break_url( nodelist )
-    local p
-
-    local slash = string.byte("/")
-    for n in node.traverse_id(glyph_node,nodelist) do
-        p = node.new(penalty_node)
-
-        if n.char == slash then
-            p.penalty=-50
-        else
-            p.penalty=-5
-        end
-        p.next = n.next
-        n.next = p
-        p.prev = n
-    end
-    return nodelist
-end
-
-function colorbar( wd,ht,dp,color )
-    local colorname = color
-    if not colorname or colorname == "" then
-        colorname = "black"
-    end
-    if not colors[colorname] then
-        err("Color %q not found",color)
-        colorname = "black"
-    end
-
-    local rule_start = node.new(whatsit_node,"pdf_literal")
-    rule_start.mode = 1
-    rule_start.data = "q "..colors[colorname].pdfstring
-
-    local rule = node.new("rule")
-    rule.height = ht
-    rule.depth  = dp
-    rule.width  = wd
-
-    local rule_stop = node.new(whatsit_node,"pdf_literal")
-    rule_stop.mode = 1
-    rule_stop.data = "Q"
-
-    rule_start.next = rule
-    rule.next = rule_stop
-    rule_stop.prev = rule
-    rule.prev = rule_start
-    return rule_start, rule_stop
-end
-
---- Rotate a text on a given angle.
-function rotate( nodelist,angle )
-    local wd,ht = nodelist.width, nodelist.height + nodelist.depth
-    nodelist.width = 0
-    nodelist.height = 0
-    nodelist.depth = 0
-    local angle_rad = math.rad(angle)
-    local sin = math.round(math.sin(angle_rad),3)
-    local cos = math.round(math.cos(angle_rad),3)
-    local q = node.new(whatsit_node,"pdf_literal")
-    q.mode = 0
-    local shift_x = math.round(math.min(0,math.sin(angle_rad) * sp_to_bp(ht)) + math.min(0,     math.cos(angle_rad) * sp_to_bp(wd)),3)
-    local shift_y = math.round(math.max(0,math.sin(angle_rad) * sp_to_bp(wd)) + math.max(0,-1 * math.cos(angle_rad) * sp_to_bp(ht)),3)
-    q.data = string.format("q %g %g %g %g %g %g cm",cos,sin, -1 * sin,cos, -1 * shift_x ,-1 * shift_y )
-    q.next = nodelist
-    local tail = node.tail(nodelist)
-    local Q = node.new(whatsit_node,"pdf_literal")
-    Q.data = "Q"
-    tail.next = Q
-    local tmp = node.vpack(q)
-    tmp.width  = math.abs(wd * cos) + math.abs(ht * math.cos(math.rad(90 - angle)))
-    tmp.height = math.abs(ht * math.sin(math.rad(90 - angle))) + math.abs(wd * sin)
-    tmp.depth = 0
-    return tmp
-end
-
---- Make a string XML safe
-function xml_escape( str )
-    local replace = {
-        [">"] = "&gt;",
-        ["<"] = "&lt;",
-        ["\""] = "&quot;",
-        ["&"] = "&amp;",
-    }
-    local ret = str.gsub(str,".",replace)
-    return ret
-end
-
---- See `commands#save_dataset()` for  documentation on the data structure for `xml_element`.
-function xml_to_string( xml_element, level )
-    level = level or 0
-    local str = ""
-    str = str .. string.rep(" ",level) .. "<" .. xml_element[".__local_name"]
-    for k,v in pairs(xml_element) do
-        if type(k) == "string" and not k:match("^%.") then
-            str = str .. string.format(" %s=%q", k,v)
-        end
-    end
-    str = str .. ">\n"
-    for i,v in ipairs(xml_element) do
-        str = str .. xml_to_string(v,level + 1)
-    end
-    str = str .. string.rep(" ",level) .. "</" .. xml_element[".__local_name"] .. ">\n"
-    return str
-end
-
---- The language name is something like `German` or a locale.
-function get_languagecode( locale_or_name )
-    local locale = locale_or_name
-
-    if language_mapping[locale_or_name] then
-        locale = language_mapping[locale_or_name]
-    end
-
-    if languages[locale] then
-        return languages[locale]
-    end
-
-    local filename_part
-    if language_filename[locale] then
-        filename_part = language_filename[locale]
-    else
-        local lang, _ = table.unpack(string.explode(locale,"_"))
-        if language_filename[lang] then
-            filename_part = language_filename[lang]
-        end
-    end
-    if not filename_part then
-        err("Can't find hyphenation patterns for language %s",tostring(locale))
-        return 0
-    end
-
-    local filename = string.format("hyph-%s.pat.txt",filename_part)
-    log("Loading hyphenation patterns %q.",filename)
-    local path = kpse.find_file(filename)
-    local pattern_file = io.open(path)
-    local pattern = pattern_file:read("*all")
-    pattern_file:close()
-
-    local l = lang.new()
-    l:patterns(pattern)
-    local id = l:id()
-    log("Language id: %d",id)
-    languages[locale] = id
-    return id
-end
-
-function set_pageformat( wd,ht )
-    options.pagewidth    = wd
-    options.pageheight  = ht
-    tex.pdfpagewidth =  wd
-    tex.pdfpageheight = ht
-    -- why the + 2cm? is this for the trim-/art-/bleedbox? FIXME: document
-    tex.pdfpagewidth  = tex.pdfpagewidth   + tex.sp("2cm")
-    tex.pdfpageheight = tex.pdfpageheight  + tex.sp("2cm")
-
-    -- necessary? FIXME: check if necessary.
-    tex.hsize = wd
-    tex.vsize = ht
-end
-
---- This function is only called once from `dothings()` during startup phase. We define
---- a family with regular, bold, italic and bolditalic font with size 10pt (we always
---- measure font size in dtp points)
-function define_default_fontfamily()
-    local fam={
-        size         = 10 * factor,
-        baselineskip = 12 * factor,
-        scriptsize   = 10 * factor * 0.8,
-        scriptshift  = 10 * factor * 0.3,
-    }
-    local ok,tmp
-    ok,tmp = fonts.make_font_instance("TeXGyreHeros-Regular",fam.size)
-    fam.normal = tmp
-    ok,tmp = fonts.make_font_instance("TeXGyreHeros-Regular",fam.scriptsize)
-    fam.normalscript = tmp
-
-    ok,tmp = fonts.make_font_instance("TeXGyreHeros-Bold",fam.size)
-    fam.bold = tmp
-    ok,tmp = fonts.make_font_instance("TeXGyreHeros-Bold",fam.scriptsize)
-    fam.boldscript = tmp
-
-    ok,tmp = fonts.make_font_instance("TeXGyreHeros-Italic",fam.size)
-    fam.italic = tmp
-    ok,tmp = fonts.make_font_instance("TeXGyreHeros-Italic",fam.scriptsize)
-    fam.italicscript = tmp
-
-    ok,tmp = fonts.make_font_instance("TeXGyreHeros-BoldItalic",fam.size)
-    fam.bolditalic = tmp
-    ok,tmp = fonts.make_font_instance("TeXGyreHeros-BoldItalic",fam.scriptsize)
-    fam.bolditalicscript = tmp
-    fonts.lookup_fontfamily_number_instance[#fonts.lookup_fontfamily_number_instance + 1] = fam
-    fonts.lookup_fontfamily_name_number["text"]=#fonts.lookup_fontfamily_number_instance
-end
-
--- Return remaining height (sp), first row, last row
-function get_remaining_height(area,allocate)
-    local cols = current_grid:number_of_columns(area)
-    local startcol = 1
-    local row,firstrow,lastrow,maxrows
-    firstrow = current_grid:current_row(area)
-    maxrows  = current_grid:number_of_rows(area)
-    if allocate == "auto" then
-        return (maxrows - firstrow + 1)  * current_grid.gridheight, firstrow, nil
-    end
-
-    if not current_grid:fits_in_row_area(startcol,cols,firstrow,area) then
-        while firstrow <= maxrows do
-            if current_grid:fits_in_row_area(startcol,cols,firstrow,area) then
-                break
-            end
-            firstrow = firstrow + 1
-        end
-    end
-
-    row = firstrow
-
-    while current_grid:fits_in_row_area(startcol,cols,row,area) and row <= maxrows do
-        row = row + 1
-    end
-
-    lastrow = row
-
-    while row <= maxrows do
-        if current_grid:fits_in_row_area(startcol,cols,row,area) then
-            return ( lastrow - firstrow)  * current_grid.gridheight, firstrow, firstrow
-        end
-        row = row + 1
-    end
-    return ( lastrow - firstrow)  * current_grid.gridheight, firstrow, nil
-
-end
-
-function next_row(rownumber,areaname,rows)
-    local grid = current_grid
-
-    if rownumber then
-        grid:set_current_row(rownumber,areaname)
-        return
-    end
-
-    local current_row
-    current_row = grid:find_suitable_row(1,grid:number_of_columns(areaname),rows,areaname)
-    if not current_row then
-        publisher.next_area(areaname)
-        publisher.setup_page()
-        grid = publisher.current_page.grid
-        grid:set_current_row(1)
-    else
-        grid:set_current_row(current_row + rows - 1,areaname)
-        grid:set_current_column(1,areaname)
-    end
-end
-
-function set_image_length(len,width_or_height)
-    if len == nil or len == "auto" then
-        return nil
-    elseif len == "100%" and width_or_height == "width" then
-        return xpath.get_variable("__maxwidth") * current_grid.gridwidth
-    elseif tonumber(len) then
-        if width_or_height == "width" then
-            return len * current_grid.gridwidth
-        else
-            return len * current_grid.gridheight
-        end
-    else
-        return tex.sp(len)
-    end
-end
-
-function empty_block()
-    local r = node.new(hlist_node)
-    r.width = 0
-    r.height = 0
-    r.depth = 0
-    local v = node.vpack(r)
-    trace("empty_block")
-    return v
-end
-
-
-function emergency_block()
-    local r = node.new(rule_node)
-    r.width = 5 * 2^16
-    r.height = 5 * 2^16
-    r.depth = 0
-    local v = node.vpack(r)
-    trace("emergency_block")
-    return v
-end
-
-function calculate_image_width_height( image, width,height,minwidth,minheight,maxwidth, maxheight )
-    -- from http://www.w3.org/TR/CSS2/visudet.html#min-max-widths:
-    --
-    -- Constraint Violation                                                           Resolved Width                      Resolved Height
-    -- ===================================================================================================================================================
-    --  1 none                                                                        w                                   h
-    --  2 w > max-width                                                               max-width                           max(max-width * h/w, min-height)
-    --  3 w < min-width                                                               min-width                           min(min-width * h/w, max-height)
-    --  4 h > max-height                                                              max(max-height * w/h, min-width)    max-height
-    --  5 h < min-height                                                              min(min-height * w/h, max-width)    min-height
-    --  6 (w > max-width) and (h > max-height), where (max-width/w ≤ max-height/h)    max-width                           max(min-height, max-width * h/w)
-    --  7 (w > max-width) and (h > max-height), where (max-width/w > max-height/h)    max(min-width, max-height * w/h)    max-height
-    --  8 (w < min-width) and (h < min-height), where (min-width/w ≤ min-height/h)    min(max-width, min-height * w/h)    min-height
-    --  9 (w < min-width) and (h < min-height), where (min-width/w > min-height/h)    min-width                           min(max-height, min-width * h/w)
-    -- 10 (w < min-width) and (h > max-height)                                        min-width                           max-height
-    -- 11 (w > max-width) and (h < min-height)                                        max-width                           min-height
-
-    if width < minwidth and height > maxheight then
-        -- w("10")
-        width = minwidth
-        height = maxheight
-    elseif width > maxwidth and height < minheight then
-        -- w("11")
-        width = maxwidth
-        height = minheight
-    elseif width > maxwidth and height > maxheight and maxwidth / width <= maxheight / height then
-        -- w("6")
-        width = maxwidth
-        height = math.max(minheight, maxwidth * height/width)
-    elseif width > maxwidth and height > maxheight and maxwidth / width > maxheight / height then
-        -- w("7")
-        width = math.max(minwidth,maxheight * width / height)
-        height = maxheight
-    elseif width < minwidth and height < minheight and minwidth / width <= minheight / height then
-        -- w("8")
-        width  = math.min(maxwidth,minheight * width / height)
-        height = minheight
-    elseif width < minwidth and height < minheight and minwidth / width > minheight / height then
-        -- w("9")
-        width = minwidth
-        height = math.min(maxheight,minwidth * height / width)
-    elseif width > maxwidth then
-        -- w("2")
-        width = maxwidth
-        height = math.max(maxwidth * height / width, minheight )
-    elseif width < minwidth then
-        -- w("3")
-        width = minwidth
-        height = math.min(minwidth * height / width, maxheight)
-    elseif height > maxheight then
-        -- w("4")
-        width = math.max(maxheight * width / height, minwidth)
-        height = maxheight
-    elseif height < minheight then
-        -- w("5")
-        width = math.min(minheight * width / height, maxwidth)
-        height = minheight
-    end
-
-    -- If one of height or width is given, the other one should
-    -- be adjusted to keep the aspect ratio
-    if height == image.height then
-        if width ~= image.width then
-            height = height * width / image.width
-        end
-    elseif width == image.width then
-        if height ~= image.height then
-            width = width *  height / image.height
-        end
-    end
-    return width, height
-end
-
+--- Sorting
+--- -------
+--- The sorting code is currently used for index generation (commands#makeindex)
 
 -- see http://lua.2524044.n2.nabble.com/A-stable-sort-td7648892.html
 -- public domain or cc0
-
 
 -- If you're using LuaJIT, change to 72.
 local max_chunk_size = 12
@@ -2661,12 +2872,6 @@ function stable_sort( array, goes_before )
     return array
 end
 -- end of stable sorting function
-
-function set_mainlanguage( mainlanguage )
-    log("Setting default language to %q",mainlanguage or "?")
-    defaultlanguage = get_languagecode(mainlanguage)
-end
-
 
 
 file_end("publisher.lua")

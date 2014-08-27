@@ -16,6 +16,8 @@ local current_element
 local decoder
 local err = err or print
 
+local parse_xml_file
+
 local html5entities = { apos = "'",
 	["Aacute"] = "Á", ["aacute"] = "á",  ["acirc"] = "â",   ["Acirc"] = "Â",   ["acute"] = "´",  ["AElig"] = "Æ",
 	["aelig"] = "æ",  ["agrave"] = "à",  ["Agrave"] = "À",  ["alefsym"] = "ℵ", ["Alpha"] = "Α",  ["alpha"] = "α",
@@ -107,7 +109,7 @@ local apos  = P"'"
 local non_att_quote = P( 1 - quote)^0
 local non_att_apos  = P( 1 - apos)^0
 local space = S("\09\010\013\032")^1
-local name = P(1 - ( space + "="))^1
+local name = P(1 - ( space + "=" + "<" + ">"))^1
 local att_value = ( quote * lpeg.C(non_att_quote) * quote + apos * lpeg.C(non_att_apos) * apos ) / _att_value
 local attrib = (space^-1 * lpeg.C(name) * space^-1 * P"=" * space^-1 * att_value) / _attribute
 local attributes = attrib^0 * space^-1
@@ -154,18 +156,10 @@ local function parse_doctype(txt,pos)
 	local newpos = string.find(txt,"<",pos+1)
 	return newpos
 end
-local function parse_comment( txt,pos )
-	local _,newpos,contents = string.find(txt,"%-(.-)%-%->",pos+3)
-	-- return {[".__type"]="comment",contents},newpos
-	return "",newpos
-end
+
 local function parse_pi(txt,pos)
 	local _,newpos,contents = string.find(txt,"<%?(.-)%?>",pos)
 	return {[".__type"]="pi", contents },newpos
-end
-local function parse_cdata( txt,pos )
-	local _,newpos,contents = string.find(txt,"<!%[CDATA%[(.-)%]%]>",pos)
-	return contents,newpos
 end
 
 local function parse_endelement( txt,pos )
@@ -177,26 +171,21 @@ local function parse_element( txt,pos,namespaces )
 	local second_nextchar
 	local contents
 	local _,_,nextchar = string.find(txt,"(.)",pos+1)
-	if nextchar == "!" then
-		_,_,second_nextchar = string.find(txt,"(.)",pos+2)
-		if second_nextchar=="-" then
-			-- exclam hyphen -> comment
-			return parse_comment(txt,pos)
-		else
-			return parse_cdata(txt,pos)
-		end
-	elseif nextchar == "/" then -- </endelement
+	if nextchar == "/" then -- </endelement
 		pos = parse_endelement(txt,pos)
 		return nil,pos
 		-- end element
 	elseif nextchar == "?" then
 		return parse_pi(txt,pos)
 	else
-		local elt,eltname,namespace,local_name,ns
+		local elt,eltname,namespace,local_name,ns,xinclude
 		_,pos,eltname = string.find(txt,"([^/>%s]+)",pos + 1)
 		pos, elt = read_attributes(txt,pos + 1,namespaces)
 		_,_,namespace,local_name = string.find(eltname,"^(.-):(.*)$")
 		ns = elt[".__ns"]
+		if ns and ns[namespace] == "http://www.w3.org/2001/XInclude" and local_name == "include" then
+			xinclude = parse_xml_file(elt["href"])
+		end
 		if namespace then
 			if ns and ns[namespace] then
 				elt[".__namespace"] = ns[namespace]
@@ -216,7 +205,11 @@ local function parse_element( txt,pos,namespaces )
 		_,rangle = string.find(txt,">",pos)
 		_,_,pre_rangle = string.find(txt,"(.)",rangle - 1)
 		if pre_rangle == "/" then
-			return elt,rangle
+			if xinclude then
+				return xinclude,rangle
+			else
+				return elt,rangle
+			end
 		end
 		pos = rangle
 		-- "Regular" (non-empty) element. Now parse it
@@ -246,10 +239,24 @@ local function parse_element( txt,pos,namespaces )
 					contents[".__parent"] = elt
 				end
 			else
-				return elt,pos
+				if xinclude then
+					return xinclude,pos
+				else
+					return elt,pos
+				end
 			end
 		end
 	end
+end
+
+local function replacecdata( txt )
+	return string.gsub(txt,".", function(arg)
+		if arg == "<" then return "&lt;"
+		elseif arg == "&" then return "&amp;"
+		elseif arg == "'" then return "&apos;"
+		elseif arg == '"' then return "&quot;"
+		end
+	end)
 end
 
 local function parse_xml(txt,options)
@@ -276,6 +283,8 @@ local function parse_xml(txt,options)
 	if string.match(txt,"<!DOCTYPE",pos) then
 		pos = parse_doctype(txt,pos)
 	end
+	txt = string.gsub(txt,"<!%[CDATA%[(.-)%]%]>",replacecdata)
+	txt = string.gsub(txt,"<!%-%-.-%-%->","")
 	local ret
 	while true do
 		ret,pos = parse_element(txt,pos,{})
@@ -285,7 +294,7 @@ local function parse_xml(txt,options)
 	return ret
 end
 
-local function parse_xml_file( path, options)
+function parse_xml_file( path, options)
 	options = options or {}
   local xmlfile = io.open(path,"rb")
   if not xmlfile then

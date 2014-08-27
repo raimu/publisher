@@ -123,6 +123,7 @@
       </choice>
     </oneOrMore>
   </define>
+
   <define name="descriptions">
       <element name="description">
         <attribute name="xml:lang">
@@ -157,7 +158,8 @@
       </oneOrMore>
       <oneOrMore>
         <element name="command">
-          <attribute name="name" />
+          <optional><attribute name="en"/></optional>
+          <optional><attribute name="de"/></optional>
           <ref name="descriptions" />
           <element name="childelements">
             <zeroOrMore>
@@ -174,7 +176,8 @@
           </element>
           <zeroOrMore>
             <element name="attribute">
-              <attribute name="name" />
+              <attribute name="en"/>
+              <attribute name="de"/>
               <attribute name="optional">
                 <choice>
                   <value>yes</value>
@@ -188,7 +191,6 @@
                     <value>choice</value>
                     <value>all_last</value>
                     <value>all_first</value>
-                    <value>fullwithout</value>
                     <value>xpath</value>
                     <value>number</value>
                     <value>numberorlength</value>
@@ -199,10 +201,8 @@
                     <value>colormodel</value>
                     <value>alignment</value>
                     <value>length</value>
-                    <value>horizontalvertical</value>
                     <value>yesnoauto</value>
                     <value>solidwithout</value>
-                    <value>topmiddlebottom</value>
                     <value>leftright</value>
                     <value>topbottom</value>
                     <value>numberlengthorstar</value>
@@ -276,6 +276,20 @@
           </oneOrMore>
         </element>
       </oneOrMore>
+      <element name="translations">
+        <oneOrMore>
+          <element name="values">
+            <oneOrMore>
+              <element name="value">
+                <attribute name="key"/>
+                <attribute name="en"/>
+                <attribute name="de"/>
+                <attribute name="context"/>
+              </element>
+            </oneOrMore>
+          </element>
+        </oneOrMore>
+      </element>
     </element>
 
   </start>

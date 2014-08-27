@@ -4,14 +4,15 @@
 --  spinit.lua
 --  speedata publisher
 --
---  Copyright 2010-2014 Patrick Gundlach.
---  See file COPYING in the root directory for license details.
+--  For a list of authors see `git blame'
+--  See file COPYING in the root directory for license info.
 
 
 
 -- file_start("spinit.lua")
 
 require("i18n")
+local comm = require("publisher.comm")
 
 tex.enableprimitives('',tex.extraprimitives ())
 -- Lua 5.2 has table.unpack
@@ -36,7 +37,7 @@ end
 function call(...)
   local ret = { pcall(...) }
   if ret[1]==false then
-    err(tostring(ret[2])  .. debug.traceback())
+    err(tostring(ret[2])  .. "\n" .. debug.traceback())
     return
   end
   return unpack(ret,2)
@@ -52,6 +53,9 @@ function log(...)
   end
 end
 
+function synclog()
+  io.stdout:flush()
+end
 
 --- Convert scaled point to postscript points,
 --- rounded to three digits after decimal point
@@ -226,7 +230,11 @@ require("publisher")
 function main_loop()
   log("Start processing")
   setup()
+  -- global tcp object
+  tcp = comm.listen()
+
   call(publisher.dothings)
+  tcp:close()
   exit(true)
 end
 

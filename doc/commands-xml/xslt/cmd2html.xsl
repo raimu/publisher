@@ -13,8 +13,10 @@
   <xsl:variable name="other-languages" select="$all-languages[. ne $lang ]" />
 
   <xsl:param name="builddir" select="'/tmp/manual/'"/>
+  <xsl:param name="version" select="'0.0.0'"/>
 
-  <xsl:key name="en-texts"      match="text" use="@key" xpath-default-namespace=""/>
+  <xsl:key name="en-commands" match="/commands/command" use="@en" />
+  <xsl:key name="en-texts"    match="text" use="@key" xpath-default-namespace=""/>
 
   <xsl:variable name="refs-translations">
     <text key="directories" en="How to generate a table of contents and other directories" de="Wie werden Verzeichnisse erstellt?" />
@@ -50,7 +52,6 @@
     <value type="all_last" de="alle / letzte" en="all / last"/>
     <value type="colormodel" de="rgb oder cmyk" en="rgb or cmyk"/>
     <value type="fullwithout" de="ohne, vollständig" en="full, without" />
-    <value type="horizontalvertical" de="horizontal oder vertikal" en="horizontal or vertical"/>
     <value type="languages" de="Sprache" en="language"/>
     <value type="leftright" de="'links' oder 'rechts'" en="'left' or 'right'" />
     <value type="topbottom" de="'oben' oder 'unten'" en="'top' or 'bottom'" />
@@ -69,21 +70,23 @@
     <value type="zerotohundred" de="0 bis 100" en="0 up to 100"/>
   </xsl:variable>
 
+  <xsl:variable name="root" select="/"/>
+
   <xsl:template match="/">
     <xsl:apply-templates/>
   </xsl:template>
 
   <xsl:template match="commands">
     <xsl:for-each select="command">
-        <xsl:result-document href="{concat($builddir,'/commands-',$lang,'/',lower-case(@name),'.html')}">
-          <xsl:variable name="htmlpage" select="concat('commands-',$lang,'/',lower-case(@name),'.html')"/>
+        <xsl:result-document href="{concat($builddir,'/commands-',$lang,'/',lower-case(@en),'.html')}">
+          <xsl:variable name="htmlpage" select="concat('commands-',$lang,'/',lower-case(@en),'.html')"/>
           <xsl:text disable-output-escaping='yes'>&lt;!DOCTYPE html></xsl:text>
         <html>
           <head>
             <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
-            <link rel="stylesheet" href="../css/normal.css" type="text/css" />
-            <script src="../javascript/jquery.min.js" type="text/javascript"></script>
-            <script src="../javascript/jquery.syntax.min.js" type="text/javascript"></script>
+            <link rel="stylesheet" href="../assets/css/normal.css" type="text/css" />
+            <script src="../assets/js/jquery.min.js" type="text/javascript"></script>
+            <script src="../assets/js/jquery.syntax.min.js" type="text/javascript"></script>
             <script type="text/javascript">
                // This function is executed when the page has finished loading.
              jQuery(function($) {
@@ -91,16 +94,16 @@
              $.syntax();
              });
             </script>
-            <title><xsl:value-of select="@name"/></title>
+            <title><xsl:value-of select="sd:translate-command(@en)"/></title>
           </head>
           <body>
             <div id="logo">
             <xsl:choose>
               <xsl:when test="$lang = 'de'">
-                <a href="../index-de.html"><img src="../images/publisher_logo.png" alt="Startseite"/></a>
+                <a href="../index-de.html"><img src="../assets/images/publisher_logo.png" alt="Startseite"/></a>
               </xsl:when>
               <xsl:otherwise>
-                <a href="../index.html"><img src="../images/publisher_logo.png" alt="Start page"/></a>
+                <a href="../index.html"><img src="../assets/images/publisher_logo.png" alt="Start page"/></a>
               </xsl:otherwise>
             </xsl:choose>
             </div>
@@ -115,9 +118,9 @@
 
   <xsl:template match="command">
     <xsl:param name="pagename"/>
-    <xsl:message select="concat('&quot;',sd:translate-command(@name),'&quot;,&quot;Function&quot;,&quot;',$pagename,'&quot;')"/>
+    <xsl:message select="concat('&quot;',sd:translate-command(@en),'&quot;,&quot;Function&quot;,&quot;',$pagename,'&quot;')"/>
     <div id="elementdesc">
-      <h1>Elementname: <code class="syntax xml"><xsl:value-of select="sd:translate-command(@name)" /></code></h1>
+      <h1>Elementname: <code class="syntax xml"><xsl:value-of select="sd:translate-command(@en)" /></code></h1>
       <h2><xsl:value-of select="sd:translate-text('Description')"></xsl:value-of></h2>
       <xsl:for-each select="description[@xml:lang = $lang]/para">
         <p>
@@ -130,8 +133,8 @@
           <xsl:choose>
             <xsl:when test="count(attribute) > 0">
               <xsl:for-each select="attribute">
-                <xsl:sort select="sd:translate-attribute(@name)" />
-                <span class="tt"><a href="#{@name}"><xsl:value-of select="sd:translate-attribute(@name)"/></a></span>
+                <xsl:sort select="@*[local-name() = $lang]" />
+                <span class="tt"><a href="#{@en}"><xsl:value-of select="@*[local-name() = $lang]"/></a></span>
                 <xsl:if test=" position() &lt; last()">, </xsl:if>
               </xsl:for-each>
             </xsl:when>
@@ -182,8 +185,8 @@
           <h3><xsl:value-of select="sd:translate-text('Attributes')"/></h3>
           <dl>
             <xsl:for-each select="attribute">
-              <xsl:sort select="sd:translate-attribute(@name)" />
-              <xsl:message select="concat('&quot;',sd:translate-attribute(@name),'&quot;,&quot;Parameter&quot;,&quot;',$pagename,'#',@name,'&quot;')"/>
+              <xsl:sort select="@*[local-name() = $lang]" />
+              <xsl:message select="concat('&quot;',@*[local-name() = $lang],'&quot;,&quot;Parameter&quot;,&quot;',$pagename,'#',@en,'&quot;')"/>
               <dt>
                 <xsl:apply-templates select="." mode="attributehead"/>
               </dt>
@@ -212,8 +215,9 @@
         </xsl:apply-templates>
       </ul>
     </div>
-    <xsl:variable name="commandname" select="@name"/>
+    <xsl:variable name="commandname" select="@en"/>
     <div style="clear:both; border-bottom: 1px solid #a0a0a0; width: 100%"></div>
+    <xsl:text>Version: </xsl:text><xsl:value-of select="$version"/> |
     <xsl:choose>
       <xsl:when test="$lang='de'">
         <a href="../index-de.html">Startseite</a>
@@ -258,9 +262,9 @@
   </xsl:template>
 
   <xsl:template match="attribute" mode="attributehead">
-    <a name="{@name}" />
+    <a name="{@en}" />
     <span class="tt">
-      <xsl:value-of select="sd:translate-attribute(@name)" />
+      <xsl:value-of select="@*[local-name() = $lang]" />
     </span>
     <xsl:text> (</xsl:text>
     <xsl:value-of select="sd:translate-value(@type)" />
@@ -275,7 +279,7 @@
   <xsl:template match="attribute[count(choice) > 0]" mode="attributehead">
     <a name="{@name}" />
     <span class="tt">
-      <xsl:value-of select="sd:translate-attribute(@name)" />
+      <xsl:value-of select="@*[local-name() = $lang]" />
     </span>
     <xsl:choose>
       <xsl:when test="@optional = 'yes'">
@@ -302,14 +306,14 @@
   <xsl:template match="commands" mode="commandlist">
     <xsl:param name="currentcommand"/>
     <xsl:for-each select="command">
-      <xsl:sort select="sd:translate-command(@name)"/>
+      <xsl:sort select="sd:translate-command(@en)"/>
       <li>
       <xsl:choose>
         <xsl:when test="@name = $currentcommand">
           <xsl:attribute name="class" select="'active'"/>
         </xsl:when>
       </xsl:choose>
-        <a href="{sd:makelink(@name)}"><xsl:value-of select="sd:translate-command(@name)"/></a>
+        <a href="{sd:makelink(@en)}"><xsl:value-of select="sd:translate-command(@en)"/></a>
       </li>
     </xsl:for-each>
   </xsl:template>
@@ -338,6 +342,12 @@
     <xsl:param name="name"/>
     <xsl:value-of select="concat(encode-for-uri(lower-case($name)),'.html')"/>
   </xsl:function>
+
+  <xsl:function name="sd:translate-command">
+    <xsl:param name="name"/>
+    <xsl:value-of select="key('en-commands',$name,$root)/@*[local-name() = $lang]"/>
+  </xsl:function>
+
 
   <xsl:function name="sd:translate-value">
     <xsl:param name="type"/>

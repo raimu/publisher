@@ -43,7 +43,7 @@ lookup_fontfamily_number_instance={}
 function load_fontfile( name, filename,parameter_tab)
     assert(filename)
     assert(name)
-    lookup_fontname_filename[name]={filename,parameter_tab}
+    lookup_fontname_filename[name]={filename,parameter_tab or {}}
     return true
 end
 
@@ -80,8 +80,10 @@ function make_font_instance( name,size )
     end
     local filename,parameter = unpack(lookup_fontname_filename[name])
     assert(filename)
-
     local k = {filename = filename, size = size}
+    if parameter.otfeatures then
+        k.smcp = parameter.otfeatures.smcp
+    end
     local fontnumber = table.find(font_instances,k)
     if fontnumber then
         return true,fontnumber
@@ -165,7 +167,7 @@ function pre_linebreak( head )
             else
                 -- FIXME: how can it be that there is no glue_spec???
                 -- no glue_spec found.
-                gluespec = node.new("glue_spec",0)
+                gluespec = node.new("glue_spec")
                 local fontfamily=node.has_attribute(head,att_fontfamily)
                 local instance = lookup_fontfamily_number_instance[fontfamily]
                 local f = used_fonts[instance.normal]
@@ -249,7 +251,7 @@ function pre_linebreak( head )
                                             if i==1 then
                                                 head.char=f.fontloader.lookup_codepoint_by_name[v]
                                             else
-                                                local n = node.new("glyph",0)
+                                                local n = node.new("glyph")
                                                 n.next = head.next
                                                 n.font = tmp_fontnum
                                                 n.lang = 0

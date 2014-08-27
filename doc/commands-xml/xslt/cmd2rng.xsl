@@ -5,6 +5,7 @@
   xmlns:sd="urn:speedata.de:2011/publisher/documentation/functions"
   xmlns:sddoc="urn:speedata.de:2011/publisher/documentation"
   xmlns:a="http://relaxng.org/ns/compatibility/annotations/1.0"
+  xpath-default-namespace="urn:speedata.de:2011/publisher/documentation"
   version="2.0">
   <xsl:output indent="yes"/>
   <xsl:include href="translatehelper.xsl"/>
@@ -16,25 +17,34 @@
     <grammar xmlns="http://relaxng.org/ns/structure/1.0"
       ns="urn:speedata.de:2009/publisher/{$lang}">
       <start>
-        <ref name="e_Layout"/>
+        <choice>
+          <ref name="e_Layout"/>
+          <ref name="e_Include"/>
+        </choice>
       </start>
-      <xsl:apply-templates select="sddoc:commands/*"/>
+      <xsl:apply-templates select="sddoc:commands/sddoc:command | sddoc:commands/sddoc:define"/>
     </grammar>
   </xsl:template>
 
-  <xsl:template match="sddoc:command" xpath-default-namespace="urn:speedata.de:2011/publisher/documentation">
-    <define name="e_{@name}" xmlns="http://relaxng.org/ns/structure/1.0">
-      <element name="{sd:translate-command(@name)}">
+  <xsl:template match="sddoc:command">
+    <define name="e_{@en}" xmlns="http://relaxng.org/ns/structure/1.0">
+      <element name="{@*[local-name() = $lang] }">
         <a:documentation><xsl:apply-templates select="description[@xml:lang = $lang]"/></a:documentation>
         <xsl:choose>
+          <xsl:when test="@en = 'Include'">
+            <optional>
+              <attribute name="xml:base"/>
+            </optional>
+          </xsl:when>
+        </xsl:choose>
+        <xsl:choose>
           <!-- An element with no child elements must be declared empty -->
-          <xsl:when test="count(childelements//cmd) = 0 and count(childelements//reference) = 0 and count(childelements//element) = 0">
+          <xsl:when test="count(childelements//cmd) = 0 and count(childelements//reference) = 0 and count(childelements//element) = 0 and count(childelements/text) = 0 ">
             <xsl:apply-templates select="attribute"/>
             <empty/>
           </xsl:when>
           <xsl:otherwise>
             <xsl:apply-templates select="attribute"/>
-            <xsl:apply-templates select="childelements/text"/>
             <xsl:apply-templates select="childelements"/>
           </xsl:otherwise>
         </xsl:choose>
@@ -90,7 +100,7 @@
     <xsl:choose>
       <xsl:when test="@optional = 'yes'">
         <optional xmlns="http://relaxng.org/ns/structure/1.0">
-          <attribute name="{sd:translate-attribute(@name)}">
+          <attribute name="{@*[local-name() = $lang]}">
             <a:documentation><xsl:apply-templates  select="sddoc:description[@xml:lang = $lang]"/></a:documentation>
             <xsl:call-template name="foo"/>
             <xsl:choose>
@@ -106,7 +116,7 @@
         </optional>
       </xsl:when>
       <xsl:otherwise>
-        <attribute name="{sd:translate-attribute(@name)}" xmlns="http://relaxng.org/ns/structure/1.0">
+        <attribute name="{@*[local-name() = $lang]}" xmlns="http://relaxng.org/ns/structure/1.0">
           <a:documentation><xsl:apply-templates  select="sddoc:description[@xml:lang = $lang]"/></a:documentation>
           <xsl:call-template name="foo"/>
         </attribute>
@@ -119,7 +129,8 @@
   </xsl:template>
 
   <xsl:template match="sddoc:cmd" mode="annotation">
-    <xsl:value-of select="sd:translate-command(@name)"/>
+    <xsl:variable name="name" select="@name"/>
+    <xsl:value-of select="/commands/command[@en = $name]/@*[local-name() = $lang]"/>
   </xsl:template>
 
   <xsl:template name="foo">

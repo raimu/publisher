@@ -1,10 +1,9 @@
 --
---  publisher/src/lua/tabular.lua
+--  tabular.lua
 --  speedata publisher
 --
---  Copyright 2010-2013 Patrick Gundlach.
+--  For a list of authors see `git blame'
 --  See file COPYING in the root directory for license details.
-
 
 file_start("tabular.lua")
 
@@ -24,7 +23,7 @@ function new( self )
         tablefoot_contents,
         tablewidth_target,
         columncolors  = {},
-        -- Der Abstand zwischen Spalte i und i+1, derzeit nicht benutzt
+        -- The distance between column i and i+1, currently not used
         column_distances = {},
     }
 
@@ -33,39 +32,86 @@ function new( self )
     return t
 end
 
+--- The objects in a table cell can be block objects or inline objects.
+--- See the list of [html block objects](https://developer.mozilla.org/en-US/docs/Web/HTML/Block-level_elements)
+--- for a rule of thumb how objects are arranged in a table cell. I am not sure if we should fully follow
+--- the HTML way.
+---
+--- The inner arrays contain the objects to be stacked from left to right (“inline”)
+--- and the outer array is a list of block objects that are to be stacked from top to bottom:
+---     { { img      },
+---       { par      },
+---       { img, img },
+---       { table    }  }
+---
+--- ![Objects in a table](../img/objectsintable.svg)
+--- The table is stored in the objects
 function attach_objects_row( tab )
+    -- For each block object (container) there is one row in block
     local td_elementname
     local td_contents
     for _,td in ipairs(tab) do
         td_elementname = publisher.elementname(td,true)
         td_contents    = publisher.element_contents(td)
         if td_elementname == "Td" then
-            local objects = {}
+            local block = {}
+            local inline = {}
             for i,j in ipairs(td_contents) do
                 local eltname     = publisher.elementname(j,true)
                 local eltcontents = publisher.element_contents(j)
-                if eltname == "Paragraph" then
-                    objects[#objects + 1] = eltcontents
-                elseif eltname == "Image" then
-                    -- FIXME: Image should be an object
-                    objects[#objects + 1] = eltcontents[1]
-                elseif eltname == "Table" then
-                    objects[#objects + 1] = eltcontents[1]
+                if eltname == "Image" then
+                    -- inline
+                    inline[#inline + 1] = eltcontents[1]
                 elseif eltname == "Barcode" then
-                    objects[#objects + 1] = eltcontents
-                elseif eltname == "Box" then
-                    objects[#objects + 1] = eltcontents
+                    -- inline
+                    inline[#inline + 1] = eltcontents
+                elseif eltname == "VSpace" then
+                    if #inline > 0 then
+                        -- add current inline to the list of blocks
+                        block[#block + 1] = inline
+                        inline = {}
+                    end
+                    block[#block + 1] = {eltcontents}
+                elseif eltname == "Paragraph" or eltname == "Box" then
+                    local default_textformat_name
+                    local alignment = td_contents.align or tab.align
+                    if     alignment=="center"  then  default_textformat_name = "__centered"
+                    elseif alignment=="left"    then  default_textformat_name = "__leftaligned"
+                    elseif alignment=="right"   then  default_textformat_name = "__rightaligned"
+                    elseif alignment=="justify" then  default_textformat_name = "__justified"
+                    end
+
+                    eltcontents.textformat = eltcontents.textformat or default_textformat_name or "__leftaligned"
+                    -- block
+                    if #inline > 0 then
+                        -- add current inline to the list of blocks
+                        block[#block + 1] = inline
+                        inline = {}
+                    end
+                    block[#block + 1] = {eltcontents}
+                elseif eltname == "Table" then
+                    -- block
+                    if #inline > 0 then
+                        -- add current inline to the list of blocks
+                        block[#block + 1] = inline
+                        inline = {}
+                    end
+                    block[#block + 1] = eltcontents
                 else
-                    warning("Object not recognized: %s",eltname or "???")
+                    warning("Unknown object in table: %s",eltname or "???")
                 end
             end
-            td_contents.objects = objects
+            if #inline > 0 then
+                -- add current inline to the list of blocks
+                block[#block + 1] = inline
+            end
+            td_contents.objects = block
         elseif td_elementname == "Tr" then -- probably from tablefoot/head
             attach_objects_row(td_contents)
-        elseif td_elementname == "Column" then
+        elseif td_elementname == "Column" or td_elementname == "Tablerule" then
             -- ignore, they don't have objects
         else
-            -- w("unknown element name %s",td_elementname)
+            w("unknown element name %s",td_elementname)
         end
     end
 end
@@ -76,14 +122,64 @@ function attach_objects( tab )
     end
 end
 
---------------------------------------------------------------------------
-function calculate_columnwidth_for_row(self, tr_contents,current_row,colspans,colmin,colmax )
-    local current_column
+--- Width calculation
+--- =================
+
+--- First we check for adjacent columns for collapsing border:
+--- ![maximum width](../img/bordercollapse.svg)
+---
+--- The resulting width for each border (left and right) is
+---
+--- \\(\frac{max(border-left,border-right)}{2}\\)
+---
+--- even if one
+--- side didn't have a border. In that case we need to adjust the border colors. Beware: the result is slightly undefined
+--- if both sides have different colors.
+-- Calculate the width for each column in the row.
+function calculate_columnwidths_for_row(self, tr_contents,current_row,colspans,colmin,colmax )
+    local current_column = 0
     local max_wd, min_wd -- maximum and minimum width of a table cell (Td)
     -- first we go through all rows/cells and look, how wide the columns
     -- are supposed to be. If there are colspans, they have to be treated specially
-    current_column = 0
+    if self.bordercollapse_horizontal then
+        for i=1,#tr_contents do
+            if i ~= #tr_contents then
+                local thiscell,nextcell,nextcell_borderleft,thiscell_borderright,new_borderwidth,new_borderwidth
 
+                thiscell = publisher.element_contents(tr_contents[i])
+                nextcell = publisher.element_contents(tr_contents[i + 1])
+
+                thiscell_borderright = tex.sp(thiscell["border-right"] or 0)
+                nextcell_borderleft  = tex.sp(nextcell["border-left"]  or 0)
+
+                new_borderwidth = math.abs( math.max(thiscell_borderright,nextcell_borderleft) / 2 )
+
+                nextcell["border-left"]  = new_borderwidth
+                thiscell["border-right"] = new_borderwidth
+
+                if thiscell_borderright == 0 then
+                    thiscell["border-right-color"] = nextcell["border-left-color"]
+                end
+                if nextcell_borderleft == 0 then
+                    nextcell["border-left-color"] = thiscell["border-right-color"]
+                end
+            end
+        end
+    end
+
+    --- We calculate the widths in two passes:
+    ---
+    ---  1. Calculate the width of each table cell in a row
+    ---  1. Calculate the row height
+    ---
+    --- The minimum width (min\_wd) is calculated as follows. Calculate the length of the longest item in the row:
+    ---
+    --- ![minimum width](../img/calculate_longtext2.svg)
+    ---
+    --- The maximum width (max\_wd) is calculated by typesetting the text and taking total size of the hbox into account:
+    ---
+    --- ![maximum width](../img/calculate_longtext.svg)
+    ---
     for _,td in ipairs(tr_contents) do
         local td_contents = publisher.element_contents(td)
         -- all columms (table cells)
@@ -102,38 +198,48 @@ function calculate_columnwidth_for_row(self, tr_contents,current_row,colspans,co
             end
         end
 
-        local td_borderleft = tex.sp(td_contents["border-left"]  or 0)
-        local td_boderright = tex.sp(td_contents["border-right"] or 0)
+        local td_borderleft  = tex.sp(td_contents["border-left"]  or 0)
+        local td_borderright = tex.sp(td_contents["border-right"] or 0)
+        local padding_left   = td_contents.padding_left  or self.padding_left
+        local padding_right  = td_contents.padding_right or self.padding_right
 
-        local padding_left  = td_contents.padding_left  or self.padding_left
-        local padding_right = td_contents.padding_right or self.padding_right
+        for _,blockobject in ipairs(td_contents.objects) do
+            for i=1,#blockobject do
+                local inlineobject = blockobject[i]
+                if type(inlineobject)=="table" then
+                    trace("table: check for nodelist (%s)",tostring(inlineobject.nodelist ~= nil))
 
-        for _,object in ipairs(td_contents.objects) do
-            if type(object)=="table" then
-                trace("table: check for nodelist (%s)",tostring(object.nodelist ~= nil))
+                    if inlineobject.nodelist then
+                        publisher.set_fontfamily_if_necessary(inlineobject.nodelist,self.fontfamily)
+                        publisher.fonts.pre_linebreak(inlineobject.nodelist)
+                    end
 
-                if object.nodelist then
-                    publisher.set_fontfamily_if_necessary(object.nodelist,self.fontfamily)
-                    publisher.fonts.pre_linebreak(object.nodelist)
+                    if inlineobject.min_width then
+                        min_wd = math.max(inlineobject:min_width(inlineobject.alignment) + padding_left  + padding_right + td_borderleft + td_borderright, min_wd or 0)
+                    end
+                    if inlineobject.max_width then
+                        max_wd = math.max(inlineobject:max_width() + padding_left  + padding_right + td_borderleft + td_borderright, max_wd or 0)
+                    end
+                    trace("table: min_wd, max_wd set (%gpt,%gpt)",min_wd / 2^16, max_wd / 2^16)
+                elseif node.is_node(inlineobject) and node.has_field(inlineobject,"width") then
+                    min_wd = math.max(inlineobject.width + padding_left  + padding_right + td_borderleft + td_borderright, min_wd or 0)
+                    max_wd = math.max(inlineobject.width + padding_left  + padding_right + td_borderleft + td_borderright, max_wd or 0)
                 end
-
-                if object.min_width then
-                    min_wd = math.max(object:min_width() + padding_left  + padding_right + td_borderleft + td_boderright, min_wd or 0)
-                end
-                if object.max_width then
-                    max_wd = math.max(object:max_width() + padding_left  + padding_right + td_borderleft + td_boderright, max_wd or 0)
-                end
-                trace("table: min_wd, max_wd set (%gpt,%gpt)",min_wd / 2^16, max_wd / 2^16)
             end
             if not ( min_wd and max_wd) then
-                trace("min_wd and max_wd not set yet. Type(object)==%s",type(object))
-                if object.width then
-                    min_wd = object.width + padding_left  + padding_right + td_borderleft + td_boderright
-                    max_wd = object.width + padding_left  + padding_right + td_borderleft + td_boderright
-                    trace("table: width (image) = %gpt",min_wd / 2^16)
+                trace("min_wd and max_wd not set yet. Type(inlineobject)==%s",type(inlineobject))
+                if node.has_field(inlineobject,"width") then
+                    if inlineobject.width then
+                        min_wd = inlineobject.width + padding_left  + padding_right + td_borderleft + td_borderright
+                        max_wd = inlineobject.width + padding_left  + padding_right + td_borderleft + td_borderright
+                        trace("table: width (image) = %gpt",min_wd / 2^16)
+                    else
+                        warning("Could not determine min_wd and max_wd")
+                        assert(false)
+                    end
                 else
-                    warning("Could not determine min_wd and max_wd")
-                    assert(false)
+                    min_wd = 0
+                    max_wd = 0
                 end
             end
         end
@@ -152,19 +258,33 @@ function calculate_columnwidth_for_row(self, tr_contents,current_row,colspans,co
 end
 
 
+--- Calculate the widths of the columns for the table.
+--- -------------------------------------------------
 function calculate_columnwidth( self )
     trace("table: calculate columnwidth")
     local colspans = {}
     local colmax,colmin = {},{}
 
     local current_row = 0
-    self.tablewidth_target = self.breite
+    self.tablewidth_target = self.width
     local columnwidths_given = false
 
     for _,tr in ipairs(self.tab) do
         local tr_contents      = publisher.element_contents(tr)
         local tr_elementname = publisher.elementname(tr,true)
 
+        --- When the user gives us column widths, we use them for calculation. There are two ways to
+        --- determine the column widths: with \\(n\\)* (where \\(n\\) is an integer number) or with absolute
+        --- lengths such as `4` (in grid cells) or `2.5cm`. For example:
+        ---
+        ---     <Columns>
+        ---       <Column width="3cm"/>
+        ---       <Column width="1*"/>
+        ---       <Column width="3*"/>
+        ---     </Columns>
+        --- When we typeset a table with a requested with of 11cm, the first column would get 3cm,
+        --- the second column 1/4 of the rest (2cm) and the third 3/4 of the rest (6cm).
+        --- ![Table calculation](../img/table313.svg)
         if tr_elementname == "Columns" then
             local wd
             local i = 0
@@ -226,14 +346,16 @@ function calculate_columnwidth( self )
 
     if columnwidths_given then return end
 
-    -- Phase I: calculate max_wd, min_wd
+    --- Phase I
+    --- -------
+    --- Calculate max\_wd, min\_wd. We do this in a separate function for each row.
     for _,tr in ipairs(self.tab) do
         local tr_contents      = publisher.element_contents(tr)
         local tr_elementname = publisher.elementname(tr,true)
 
         if tr_elementname == "Tr" then
             current_row = current_row + 1
-            self:calculate_columnwidth_for_row(tr_contents,current_row,colspans,colmin,colmax)
+            self:calculate_columnwidths_for_row(tr_contents,current_row,colspans,colmin,colmax)
         elseif tr_elementname == "Tablerule" then
             -- ignore
         elseif tr_elementname == "Tablehead" then
@@ -242,16 +364,16 @@ function calculate_columnwidth( self )
                 local row_elementname = publisher.elementname(row,true)
                 if row_elementname == "Tr" then
                     current_row = current_row + 1
-                    self:calculate_columnwidth_for_row(row_contents,current_row,colspans,colmin,colmax)
+                    self:calculate_columnwidths_for_row(row_contents,current_row,colspans,colmin,colmax)
                 end
             end
         elseif tr_elementname == "Tablefoot" then
             for _,row in ipairs(tr_contents) do
-                local row_contents  = publisher.element_contents(row)
+                local row_contents    = publisher.element_contents(row)
                 local row_elementname = publisher.elementname(row,true)
                 if row_elementname == "Tr" then
                     current_row = current_row + 1
-                    self:calculate_columnwidth_for_row(row_contents,current_row,colspans,colmin,colmax)
+                    self:calculate_columnwidths_for_row(row_contents,current_row,colspans,colmin,colmax)
                 end
             end
         else
@@ -260,32 +382,32 @@ function calculate_columnwidth( self )
     end -- ∀ rows / rules
 
 
-    -- Now we are finished with all cells in all rows. If there are colospans, we might have
-    -- to increase some column widths
-    --
-    -- Example (fake):
-    --     <Table width="30">
-    --       <Tr><Td>A</Td><Td>A</Td></Tr>
-    --       <Tr><Td colspan="2">A very very very long text</Td></Tr>
-    --     </Table>
-    --     ----------------------------
-    --     |A           |A            |
-    --     |A very very very long text|
-    --     ----------------------------
-    --
-    -- In this case sum(min) is approx. the width of the word "very" and sum(max) is the width of the text.
-    -- colmax[i] is the width of "A", colmin[i] also
-    --
-    -- Phase II: include colspan
-    --
+    --- Now we are finished with all cells in all rows. If there are colospans, we might have
+    --- to increase some column widths
+    ---
+    --- Example (fake):
+    ---     <Table width="30">
+    ---       <Tr><Td>A</Td><Td>A</Td></Tr>
+    ---       <Tr><Td colspan="2">A very very very long text</Td></Tr>
+    ---     </Table>
+    ---     ----------------------------
+    ---     |A           |A            |
+    ---     |A very very very long text|
+    ---     ----------------------------
+    ---
+    --- In this case sum(min) is approx. the width of the word "very" and sum(max) is the width of the text.
+    --- colmax[i] is the width of "A", colmin[i] also
+    ---
+    --- Phase II: include colspan
+    --- -------------------------
     trace("table: adjust colmin/colmax")
     for i,colspan in pairs(colspans) do
         trace("table: colspan #%d",i)
         local sum_min,sum_max = 0,0
         local r -- stretch factor = wd(colspan)/wd(sum_start_end)
 
-        -- first we calclulate how wide the columns are that are covered by colspan, but without
-        -- colspan itself
+        --- First we calculate how wide the columns are that are covered by colspan, but without
+        --- colspan itself
 
         if #colmax < colspan.stop then
             err("Not enough columns found for colspan")
@@ -294,11 +416,11 @@ function calculate_columnwidth( self )
         sum_max = table.sum(colmax,colspan.start,colspan.stop)
         sum_min = table.sum(colmin,colspan.start,colspan.stop)
 
-        -- if the colspan requires more room than the rest of the table, we have to increase
-        -- the width of all columns in the table accordingly. We stretch the columns by
-        -- a factor r. r is calculated by the contents
-
-        -- We do that once for the maximum width and once for the minimum width
+        --- If the colspan requires more room than the rest of the table, we have to increase
+        --- the width of all columns in the table accordingly. We stretch the columns by
+        --- a factor r. r is calculated by the contents.
+        ---
+        --- We do that once for the maximum width and once for the minimum width
         local width_of_colsep = table.sum(self.column_distances,colspan.start,colspan.start)
 
         if colspan.max_wd > sum_max + width_of_colsep then
@@ -319,7 +441,8 @@ function calculate_columnwidth( self )
     -- Now colmin and colmax are calculated for all columns. colspans are included.
 
 
-    -- Phase III: stretch or shrink table
+    --- Phase III: Stretch or shrink table
+    --- ----------------------------------
 
     -- Here comes the main width calculation
     -- ---------------------------------------------
@@ -327,9 +450,10 @@ function calculate_columnwidth( self )
     local colsep = (#colmax - 1) * self.colsep
     local tablewidth_is = table.sum(colmax) + colsep
 
-    -- 1) calculate natural (max) width / total width for each column
-    -- if stretch="no" is set, we can encounter the case that the table is too wide. Then it
-    -- must be shrinked
+    --- 1. calculate natural (max) width / total width for each column.
+    ---
+    --- If stretch="no" is set, we can encounter the case that the table is too wide. Then it
+    --- must be shrunk.
 
     -- highly unlikely that the table matches the size exactly
     if tablewidth_is == self.tablewidth_target then
@@ -393,11 +517,143 @@ function calculate_columnwidth( self )
     end
 end
 
-function calculate_rowheight( self,tr_contents, current_row )
+-- Typeset a table cell. Return a vlist, tightly packed (i.e. all vspace are 0).
+function pack_cell(self, blockobject, width, horizontal_alignment)
+    local cell
+    for _,blockobject in ipairs(blockobject) do
+        local cellrow = nil
+        local current_width = 0
+        if node.is_node(blockobject) then
+            cellrow = node.insert_after(cellrow,node.tail(cellrow),blockobject)
+        else
+            for i=1,#blockobject do
+                local default_textformat_name
+                local inlineobject = blockobject[i]
+                if type(inlineobject) == "table" then
+                    if width then
+                        -- ok, a paragraph with a certain width, that we can typeset
+                        if     horizontal_alignment=="center"  then  default_textformat_name = "__centered"
+                        elseif horizontal_alignment=="left"    then  default_textformat_name = "__leftaligned"
+                        elseif horizontal_alignment=="right"   then  default_textformat_name = "__rightaligned"
+                        elseif horizontal_alignment=="justify" then  default_textformat_name = "__justified"
+                        end
+                        if not default_textformat_name then
+                            if inlineobject.textformat then
+                                default_textformat_name = inlineobject.textformat
+                            elseif self.textformat then
+                                default_textformat_name = self.textformat
+                            else
+                                default_textformat_name = "__leftaligned"
+                            end
+                        end
+                        publisher.set_fontfamily_if_necessary(inlineobject.nodelist,self.fontfamily)
+                        local v = inlineobject:format(width,default_textformat_name)
+                        cell = node.insert_after(cell,node.tail(cell),v)
+                    else
+                        w("no width given in paragraph")
+                    end
+                elseif node.is_node(inlineobject) then
+                    -- an image for example
+                    if node.has_field(inlineobject,"width") then
+                        -- insert a line break if the row is too wide
+                        if current_width + inlineobject.width > width then
+                            local tmp
+                            if cellrow then
+                                if cellrow.next then
+                                    tmp = node.hpack(cellrow)
+                                else
+                                    tmp = cellrow
+                                end
+                            end
+                            cell = node.insert_after(cell,node.tail(cell),tmp)
+                            cellrow = inlineobject
+                            current_width = inlineobject.width
+                        else
+                            current_width = current_width + inlineobject.width
+                            cellrow = node.insert_after(cellrow,node.tail(cellrow),inlineobject)
+                        end
+                    else
+                        cellrow = node.insert_after(cellrow,node.tail(cellrow),inlineobject)
+                    end
+
+                else
+                    w("unknown %s",type(inlineobject))
+                end
+            end
+        end
+
+        -- cellrow can be nil if there is a paragraph for example
+        if cellrow then
+            local tmp
+            if cellrow.next then
+                tmp = node.hpack(cellrow)
+            else
+                tmp = cellrow
+            end
+            cell = node.insert_after(cell,node.tail(cell),tmp)
+        end
+    end
+
+    -- if there are no objects in a row, we create a dummy object
+    -- so the row can be created and vpack does not fall over a nil
+    cell = cell or node.new("hlist")
+
+    local n = cell
+    while n do
+        if n.id == publisher.hlist_node or n.id == publisher.vlist_node then
+            local n_prev = n.prev
+            local n_next = n.next
+            local tmp = n
+            n.next = nil
+            local glue_left, glue_right
+
+            if horizontal_alignment == "center" or horizontal_alignment == "justify" then
+                glue_left = node.copy(publisher.glue_stretch2)
+                glue_right = node.copy(publisher.glue_stretch2)
+            elseif horizontal_alignment=="left" or horizontal_alignment == nil then
+                glue_left = nil
+                glue_right = node.copy(publisher.glue_stretch2)
+            elseif horizontal_alignment=="right"   then
+                glue_left = node.copy(publisher.glue_stretch2)
+                glue_right = nil
+            end
+
+            if glue_left then
+                tmp = node.insert_before(tmp,n,glue_left)
+            end
+            if glue_right then
+                tmp = node.insert_after(tmp,n,glue_right)
+            end
+            tmp = node.hpack(tmp,width,"exactly")
+
+            if n_prev then
+                n_prev.next = tmp
+            end
+            if n_next then
+                n_next.prev = tmp
+            end
+            tmp.prev = n_prev
+            tmp.next = n_next
+            if n == cell then
+                cell = tmp
+            end
+            n = tmp
+        end
+        n = n.next
+    end
+    local ret
+    ret = node.vpack(cell)
+    return ret
+end
+
+--- last\_shiftup is for vertical border-collapse.
+function calculate_rowheight( self,tr_contents, current_row,last_shiftup )
+    last_shiftup = last_shiftup or 0
     local rowheight
     local rowspan,colspan
     local wd,parameter
     local rowspans = {}
+    local shiftup = 0
 
     local fam = publisher.fonts.lookup_fontfamily_number_instance[self.fontfamily]
     local min_lineheight = fam.baselineskip
@@ -408,15 +664,19 @@ function calculate_rowheight( self,tr_contents, current_row )
         rowheight = min_lineheight
     end
 
+    -- its not trivial to find out in which column I am in.
+    -- See the example in qa/tables/columnspread. Line three:
+    -- The first cell is in column 1, the second cell is in column 4
     current_column = 0
 
     for _,td in ipairs(tr_contents) do
+        local default_textformat_name
         local td_contents = publisher.element_contents(td)
         current_column = current_column + 1
 
 
         local td_borderleft   = tex.sp(td_contents["border-left"]   or 0)
-        local td_boderright   = tex.sp(td_contents["border-right"]  or 0)
+        local td_borderright  = tex.sp(td_contents["border-right"]  or 0)
         local td_bordertop    = tex.sp(td_contents["border-top"]    or 0)
         local td_borderbottom = tex.sp(td_contents["border-bottom"] or 0)
 
@@ -427,8 +687,13 @@ function calculate_rowheight( self,tr_contents, current_row )
 
         rowspan = tonumber(td_contents.rowspan) or 1
         colspan = tonumber(td_contents.colspan) or 1
-
         wd = 0
+
+        -- There might be a rowspan in the row above, so we need to find the correct
+        -- column width
+        while self.skip[current_row] and self.skip[current_row][current_column] do
+            current_column = current_column + 1
+        end
         for s = current_column,current_column + colspan - 1 do
             if self.colwidths[s] == nil then
                 err("Something went wrong with the number of columns in the table")
@@ -437,88 +702,38 @@ function calculate_rowheight( self,tr_contents, current_row )
             end
         end
         current_column = current_column + colspan - 1
-
         -- FIXME: use column_distances[i] instead of self.colsep
         wd = wd + ( colspan - 1 ) * self.colsep
+
         -- FIXME: take border-left and border-right into account
         --        in the height calculation also border-top and border-bottom
-        local cell
+        local alignment = td_contents.align or tr_contents.align or self.align[current_column]
+        local cell = self:pack_cell(td_contents.objects,wd - padding_left - padding_right - td_borderleft - td_borderright,alignment)
+        td_contents.cell = cell
 
-        for _,object in ipairs(td_contents.objects) do
-            if type(object)=="table" then
-                -- Its a regular paragraph!?!?
-
-                if not (object.nodelist) then
-                    err("No nodelist found!")
-                end
-
-                local align = td_contents.align or tr_contents.align or self.align[current_column]
-                if align=="center" then
-                    default_textformat_name = "__centered"
-                elseif align=="left" then
-                    default_textformat_name = "__leftaligned"
-                elseif align=="right" then
-                    default_textformat_name = "__rightaligned"
-                end
-                if not default_textformat_name then
-                    if object.textformat then
-                        default_textformat_name = object.textformat
-                    elseif self.textformat then
-                        default_textformat_name = self.textformat
-                    end
-                end
-                publisher.set_fontfamily_if_necessary(object.nodelist,self.fontfamily)
-
-                local v = object:format(wd - padding_left - padding_right - td_borderleft - td_boderright,default_textformat_name)
-                if cell then
-                    node.tail(cell).next = v
-                else
-                    cell = v
-                end
-            elseif (type(object)=="userdata" and node.has_field(object,"width")) then
-                -- an image or a box
-                -- FIXME:
-                -- The following code leads to an error if two images
-                -- are included in a table cell.
-                -- Also check QA tables/columnspread for an example why
-                -- this is necessary
-                if cell then
-                    node.tail(cell).next = object
-                else
-                    cell = object
-                end
-            end
-        end
-
-        -- if there are no objects in a row, we create a dummy object
-        -- so the row can be created and vpack does not fall over a nil
-        if not cell then
-            cell = node.new("hlist")
-        end
-        v=node.vpack(cell)
-
-        tmp = v.height + v.depth +  padding_top + padding_bottom + td_borderbottom + td_bordertop
+        tmp = cell.height + cell.depth +  padding_top + padding_bottom + td_borderbottom + td_bordertop
         if rowspan > 1 then
             rowspans[#rowspans + 1] =  { start = current_row, stop = current_row + rowspan - 1, ht = tmp }
             td_contents.rowspan_internal = rowspans[#rowspans]
         else
             rowheight = math.max(rowheight,tmp)
         end
-        -- FIXME: node.flushlist tmp ??
-        -- node.flush_list(v)
-        -- Attempt to double-free hlist node 387580, ignored.
+        if self.bordercollapse_vertical then
+            shiftup = math.max(shiftup,td_borderbottom)
+        end
     end
-    return rowheight,rowspans
+    tr_contents.shiftup = last_shiftup
+    return rowheight,rowspans,shiftup
 end
 
 
---------------------------------------------------------------------------
 function calculate_rowheights(self)
     trace("table: calculate row height")
     local current_row = 0
     local rowspans = {}
     local _rowspans
 
+    local last_shiftup = 0
 
     for _,tr in ipairs(self.tab) do
         local tr_contents = publisher.element_contents(tr)
@@ -528,23 +743,25 @@ function calculate_rowheights(self)
             -- ignorieren
 
         elseif eltname == "Tablehead" then
+            local last_shiftup_head = 0
             for _,row in ipairs(tr_contents) do
                 local cellcontents  = publisher.element_contents(row)
                 local cell_elementname = publisher.elementname(row,true)
                 if cell_elementname == "Tr" then
                     current_row = current_row + 1
-                    rowheight, _rowspans = self:calculate_rowheight(cellcontents,current_row)
+                    rowheight, _rowspans,last_shiftup_head = self:calculate_rowheight(cellcontents,current_row,last_shiftup_head)
                     self.rowheights[current_row] = rowheight
                     rowspans = table.__concat(rowspans,_rowspans)
                 end
             end
         elseif eltname == "Tablefoot" then
+            local last_shiftup_foot = 0
             for _,row in ipairs(tr_contents) do
                 local cellcontents  = publisher.element_contents(row)
                 local cell_elementname = publisher.elementname(row,true)
                 if cell_elementname == "Tr" then
                     current_row = current_row + 1
-                    rowheight, _rowspans = self:calculate_rowheight(cellcontents,current_row)
+                    rowheight, _rowspans,last_shiftup_foot = self:calculate_rowheight(cellcontents,current_row,last_shiftup_foot)
                     self.rowheights[current_row] = rowheight
                     rowspans = table.__concat(rowspans,_rowspans)
                 end
@@ -552,7 +769,7 @@ function calculate_rowheights(self)
 
         elseif eltname == "Tr" then
             current_row = current_row + 1
-            rowheight, _rowspans = self:calculate_rowheight(tr_contents,current_row)
+            rowheight, _rowspans,last_shiftup = self:calculate_rowheight(tr_contents,current_row,last_shiftup)
             self.rowheights[current_row] = rowheight
             rowspans = table.__concat(rowspans,_rowspans)
         else
@@ -587,6 +804,13 @@ function calculate_rowheights(self)
     end
 end
 
+--- ![Table cell](../img/cell.svg)
+
+--- Width calculation is now finished, we can typeset the table
+--- Typesetting the table
+--- ---------------------
+--- First, we create a complete table with all rows. Splitting into pages is done later on
+-- Return one row (an hlist)
 function typeset_row(self, tr_contents, current_row )
     trace("table: typeset row")
     local current_column
@@ -598,6 +822,7 @@ function typeset_row(self, tr_contents, current_row )
 
     current_column = 0
     for _,td in ipairs(tr_contents) do
+        local default_textformat_name
 
         current_column = current_column + 1
 
@@ -606,15 +831,15 @@ function typeset_row(self, tr_contents, current_row )
         colspan = tonumber(td_contents.colspan) or 1
 
         -- FIXME: am I sure that I am in the corerct column?  (colspan...)?
-        local td_borderleft  = tex.sp(td_contents["border-left"]   or 0)
-        local td_boderright = tex.sp(td_contents["border-right"]  or 0)
-        local td_bordertop   = tex.sp(td_contents["border-top"]    or 0)
-        local td_borderbottom  = tex.sp(td_contents["border-bottom"] or 0)
+        local td_borderleft   = tex.sp(td_contents["border-left"]   or 0)
+        local td_borderright  = tex.sp(td_contents["border-right"]  or 0)
+        local td_bordertop    = tex.sp(td_contents["border-top"]    or 0)
+        local td_borderbottom = tex.sp(td_contents["border-bottom"] or 0)
 
-        local padding_left   = td_contents.padding_left   or self.padding_left
-        local padding_right  = td_contents.padding_right  or self.padding_right
-        local padding_top    = td_contents.padding_top    or self.padding_top
-        local padding_bottom = td_contents.padding_bottom or self.padding_bottom
+        local padding_left    = td_contents.padding_left   or self.padding_left
+        local padding_right   = td_contents.padding_right  or self.padding_right
+        local padding_top     = td_contents.padding_top    or self.padding_top
+        local padding_bottom  = td_contents.padding_bottom or self.padding_bottom
 
         -- when we are on a skip-cell (because of a rowspan), we need to create an empty hbox
         while self.skip[current_row] and self.skip[current_row][current_column] do
@@ -650,11 +875,10 @@ function typeset_row(self, tr_contents, current_row )
             ht = self.rowheights[current_row]
         end
 
-        -- FIXME: do I really have to do that over and over again! This is crap. I did the same
-        -- calculate rowheights (put text into a paragraph)
         local g = node.new("glue")
         g.spec = node.new("glue_spec")
         g.spec.width = padding_top
+        node.set_attribute(g,publisher.att_origin,publisher.origin_align_top)
 
         local valign = td_contents.valign or tr_contents.valign or self.valign[current_column]
         if valign ~= "top" then
@@ -663,55 +887,25 @@ function typeset_row(self, tr_contents, current_row )
         end
 
         local cell_start = g
-
-        local zelle
         local current = node.tail(cell_start)
 
-
-        for _,object in ipairs(td_contents.objects) do
-            if type(object) == "table" then
-                if not (object and object.nodelist) then
-                    warning("No nodelist found!")
-                end
-                -- Unsure why I copied the list. It seems
-                -- to work when I just assign it
-                -- v = node.copy_list(object.nodelist)
-                v = object.nodelist
-            elseif type(object) == "userdata" then
-                -- Same here. Why did I copy the list?
-                -- v = node.copy_list(object)
-                v = object
-            end
-
-            if type(object) == "table" then
-                -- Paragraph with a node list
-                local align = td_contents.align or tr_contents.align or self.align[current_column]
-                if align=="center" then
-                    default_textformat_name = "__centered"
-                elseif align=="left" then
-                    default_textformat_name = "__leftaligned"
-                elseif align=="right" then
-                    default_textformat_name = "__rightaligned"
-                end
-                if not default_textformat_name then
-                    if object.textformat then
-                        default_textformat_name = object.textformat
-                    elseif self.textformat then
-                        default_textformat_name = self.textformat
-                    end
-                end
-                v = object:format(current_column_width - padding_left - padding_right - td_borderleft - td_boderright, default_textformat_name)
-                if publisher.options.trace then
-                    v = publisher.boxit(v)
-                end
-            elseif type(object) == "userdata" then
-                v = node.hpack(v)
-            else
-                assert(false)
-            end
-            current.next = v
-            current = v
+        local cell
+        -- td_contents.cell can be nil if we have dynamic table head and foot
+        if td_contents.cell then
+            cell = td_contents.cell.head
+            td_contents.cell.head = nil
+            node.free(td_contents.cell)
+        else
+            local alignment = td_contents.align or tr_contents.align or self.align[current_column]
+            cell = self:pack_cell(td_contents.objects,current_column_width - padding_left - padding_right - td_borderleft - td_borderright,alignment)
+            cell = cell.head
         end
+        -- The cell is a vlist with minimum height. We need to repack the contents of the
+        -- cell in order to use the aligns and VSpaces in the table cell
+
+        local tail = node.tail(cell_start)
+        tail.next = cell
+        cell.prev = tail
 
         g = node.new("glue")
         g.spec = node.new("glue_spec")
@@ -723,26 +917,30 @@ function typeset_row(self, tr_contents, current_row )
             g.spec.stretch_order = 2
         end
 
-        current.next = g
+
+        node.insert_after(cell_start,node.tail(cell_start),g)
 
         vlist = node.vpack(cell_start,ht - td_bordertop - td_borderbottom,"exactly")
-
-        -- done with a cell, let's put it into an hlist
+        --- The table cell now looks like this
+        ---
+        --- ![Table cell vertical](../img/tablecell1.svg)
+        ---
+        --- Now we need to add the left and the right glue
         g = node.new("glue")
         g.spec = node.new("glue_spec")
         g.spec.width = padding_left
 
-
-        local align = td_contents.align or tr_contents.align or self.align[current_column]
-        if align ~= "left" then
-            g.spec.stretch = 2^16
-            g.spec.stretch_order = 2
-        end
-
         cell_start = g
+        local ht_border = 0
+        local rowspan = td_contents.rowspan or 1
+        for i=1,rowspan do
+            ht_border = ht_border + self.rowheights[current_row + i - 1] + self.rowsep
+        end
+        ht_border = ht_border - td_bordertop - td_borderbottom - self.rowsep
 
-        if td_contents["border-left"] then
-            local start, stop = publisher.colorbar(tex.sp(td_contents["border-left"]),-1073741824,-1073741824,td_contents["border-left-color"])
+        if td_borderleft ~= 0 then
+            local start = publisher.colorbar(td_borderleft,ht_border,0,td_contents["border-left-color"])
+            local stop = node.tail(start)
             stop.next = g
             cell_start = start
         end
@@ -755,23 +953,17 @@ function typeset_row(self, tr_contents, current_row )
         g.spec = node.new("glue_spec")
         g.spec.width = padding_right
 
-        local align = td_contents.align or tr_contents.align or self.align[current_column]
-        if align ~= "right" then
-            g.spec.stretch = 2^16
-            g.spec.stretch_order = 2
-        end
-
         current.next = g
         current = g
-
-        if td_contents["border-right"] then
-            local rule = publisher.colorbar(tex.sp(td_contents["border-right"]),-1073741824,-1073741824,td_contents["border-right-color"])
+        if td_borderright ~= 0 then
+            local rule = publisher.colorbar(td_borderright,ht_border,0,td_contents["border-right-color"])
             g.next = rule
         end
 
         hlist = node.hpack(cell_start,current_column_width,"exactly")
-
-        -- the row is now complete. We can set the background color now
+        --- The cell is now almost complete. We can set the background color and add the top and bottom rule.
+        ---
+        --- ![Table cell vertical](../img/tablecell2.svg)
         if tr_contents.backgroundcolor or td_contents.backgroundcolor or self.columncolors[current_column] then
             -- prio: Td.backgroundcolor, then Tr.backgroundcolor, then Column.backgroundcolor
             local color = self.columncolors[current_column]
@@ -781,21 +973,19 @@ function typeset_row(self, tr_contents, current_row )
         end
 
         local head = hlist
-        if td_contents["border-top"] then
-            local rule = publisher.colorbar(-1073741824,tex.sp(td_contents["border-top"]),0,td_contents["border-top-color"])
+        if td_bordertop > 0 then
+            local rule = publisher.colorbar(current_column_width,td_bordertop,0,td_contents["border-top-color"])
             -- rule is: whatsit, rule, whatsit
             node.tail(rule).next = hlist
             head = rule
         end
 
-        if td_contents["border-bottom"] then
-            local rule = publisher.colorbar(-1073741824,tex.sp(td_contents["border-bottom"]),0,td_contents["border-bottom-color"])
+        if td_borderbottom > 0 then
+            local rule = publisher.colorbar(current_column_width,td_borderbottom,0,td_contents["border-bottom-color"])
             hlist.next = rule
         end
 
-
-        -- vlist.height = self.rowheights[current_row]
-        -- hlist.height = self.rowheights[current_row]
+        -- What is this for?
         local gl = node.new("glue")
         gl.spec = node.new("glue_spec")
         gl.spec.width = 0
@@ -803,6 +993,9 @@ function typeset_row(self, tr_contents, current_row )
         gl.spec.shrink_order = 2
         node.slide(head).next = gl
 
+        --- This is our table cell now:
+        ---
+        --- ![Table cell vertical](../img/tablecell3.svg)
         hlist = node.vpack(head,self.rowheights[current_row],"exactly")
 
         if publisher.options.trace then
@@ -817,15 +1010,18 @@ function typeset_row(self, tr_contents, current_row )
         trace("table: no td-cells found in this column")
         v = publisher.create_empty_hbox_with_width(self.tablewidth_target)
         trace("table: create empty hbox")
-        v = publisher.add_glue(v,"head",fill) -- sonst gäb's ne underfull vbox
+        v = publisher.add_glue(v,"head",fill) -- otherwise we get an underfull vbox
         row[1] = node.vpack(v,self.rowheights[current_row],"exactly")
     end
 
-    local zelle, cell_start,current
+    local cell_start,current
     cell_start = row[1]
     current = cell_start
 
-    -- FIXME: hier statt self.colsep die column_distances[i] berücksichtigen
+    --- We now add colsep and connect the cells so we have a list of vboxes and
+    --- pack them in a hbox.
+    --- ![a row](../img/tablerow.svg)
+    -- FIXME: use column_distances[i] instead of self.colsep
     if row[1] then
         for z=2,#row do
             _,current = publisher.add_glue(current,"tail",{ width = self.colsep })
@@ -836,6 +1032,12 @@ function typeset_row(self, tr_contents, current_row )
     else
         err("(Internal error) Table is not complete.")
     end
+    node.set_attribute(row,publisher.att_tr_shift_up,tr_contents.shiftup)
+    if tr_contents.sethead then
+        node.set_attribute(row,publisher.att_use_as_head,1)
+    end
+
+
     return row
 end
 
@@ -902,37 +1104,21 @@ local function make_tablefoot(self,tr_contents,tablefoot_last,tablefoot,current_
     return current_row
 end
 --------------------------------------------------------------------------
+
+-- TODO: rename function: we don't calculate the height here
 local function calculate_height_and_connect_tablehead(self,tablehead_first,tablehead)
-    local ht_header, ht_first_header = 0, 0
     -- We connect all but the last row with the next row and remember the height in ht_header
     for z = 1,#tablehead_first - 1 do
-        ht_first_header = ht_first_header + tablehead_first[z].height  -- Tr oder Tablerule
         _,tmp = publisher.add_glue(tablehead_first[z],"tail",{ width = self.rowsep })
         tmp.next = tablehead_first[z+1]
         tablehead_first[z+1].prev = tmp
     end
 
-
     for z = 1,#tablehead - 1 do
-        ht_header = ht_header + tablehead[z].height  -- Tr or Tablerule
         _,tmp = publisher.add_glue(tablehead[z],"tail",{ width = self.rowsep })
         tmp.next = tablehead[z+1]
         tablehead[z+1].prev = tmp
     end
-
-    -- perhaps there is a last row, that is connected but its height is not
-    -- taken into account yet.
-    if #tablehead > 0 then
-        ht_header = ht_header + tablehead[#tablehead].height + self.rowsep  * ( #tablehead )
-    end
-
-    if #tablehead_first > 0 then
-        ht_first_header = ht_first_header + tablehead_first[#tablehead_first].height + self.rowsep * (#tablehead_first)
-    else
-        ht_first_header = ht_header
-    end
-
-    return ht_first_header,ht_header
 end
 
 local function calculate_height_and_connect_tablefoot(self,tablefoot,tablefoot_last)
@@ -974,6 +1160,7 @@ function typeset_table(self)
     local tablehead = {}
     local tablefoot_last = {}
     local tablefoot = {}
+    local omit_head_on_pages = {}
     local rows = {}
     local break_above = true
     local filter = {}
@@ -990,7 +1177,7 @@ function typeset_table(self)
         -- Will be set to false if break_below is "no"
 
         if eltname == "Columns" then
-            -- ignorieren
+            -- ignore
         elseif eltname == "Tablerule" then
             local offset = 0
             if tr_contents.start and tr_contents.start ~= 1 then
@@ -1045,13 +1232,21 @@ function typeset_table(self)
     end
 
     if #rows == 0 then
-        -- WTF? No contents in the table
-        err("table without contents")
-        return publisher.emergency_block()
+        warning("table without contents")
+        return publisher.empty_block()
     end
 
+    local tableheads_extra = {}
 
-    local ht_first_header, ht_header = calculate_height_and_connect_tablehead(self,tablehead_first,tablehead)
+
+    -- The dynamic table head on page n should be the same as on n - 1, unless changed
+    setmetatable(tableheads_extra, { __index = function(tbl,idx)
+        if idx < 1 then return nil end
+        return tbl[idx - 1]
+    end
+    })
+
+    calculate_height_and_connect_tablehead(self,tablehead_first,tablehead)
     local ht_footer,  ht_footer_last = calculate_height_and_connect_tablefoot(self,tablefoot,tablefoot_last)
 
     if not tablehead[1] then
@@ -1071,7 +1266,9 @@ function typeset_table(self)
     local ht_max     = self.optionen.ht_max
     -- The maximum heights are saved here for each table. Currently all tables must have the same height (see the metatable)
     local pagegoals = {}
-    local function showheader( tablepart )
+
+    -- Return a boolean if we need to show the static header on this page
+    local function showheader_static( tablepart )
         if tablepart_absolute == 1 and filter.tablehead_force_first then return true end
         if not filter.tablehead then return true end
         if math.fmod(tablepart_absolute,2) == math.fmod(startpage,2) then
@@ -1088,21 +1285,57 @@ function typeset_table(self)
             end
         end
     end
+
+    -- Return a boolean if we need to show the dynamic header on this page
+    local function showheader( tablepart )
+        -- We can skip the dynamic header on pages where the first line is the next dynamic header
+        if omit_head_on_pages[tablepart] then return false end
+        if tableheads_extra[tablepart_absolute] ~= nil then return true end
+        return false
+    end
+
+
+    local function get_height_header(i)
+        local ht = 0
+        if showheader_static(i) then
+            if i == 1 then
+                ht = tablehead_first[1].height + self.rowsep
+            else
+                ht = tablehead[1].height + self.rowsep
+            end
+        end
+        if showheader(i) then
+            ht = ht + tableheads_extra[i].height + self.rowsep
+        end
+        return ht
+    end
+
     setmetatable(pagegoals, { __index = function(tbl,idx)
+                local ht_head = get_height_header(idx)
                 if idx == 1 then
-                    if showheader(idx) then
-                        return ht_current - ht_first_header - ht_footer
-                    else
-                        return ht_current - ht_footer
-                    end
+                    return ht_current - ht_head - ht_footer
+                elseif idx == -1 then
+                    return ht_max - ht_head - ht_footer_last
                 end
-                if showheader(idx) then
-                    return ht_max - ht_header - ht_footer
-                else
-                    return ht_max - ht_footer
-                end
+                return ht_max - ht_head - ht_footer
     end})
-    pagegoals[-1] = ht_max - ht_header - ht_footer_last
+
+
+    local function get_tablehead( page )
+        if tableheads_extra[page] then
+            return node.copy_list(tableheads_extra[page])
+        end
+        local tmp = node.new("hlist")
+        return tmp
+    end
+
+
+    local function get_tablehead_static( page )
+        if s == 1 then
+            return tablehead_first[1]
+        end
+        return node.copy_list(tablehead[1])
+    end
 
     -- When we split the current table we return an array:
     local final_split_tables = {}
@@ -1134,7 +1367,19 @@ function typeset_table(self)
     local last_possible_split_is_after_line = 0
 
     local current_page = 1
+
     for i=1,#rows do
+        -- We can mark a row as "use_as_head" to turn the row into a dynamic head
+        local use_as_head = node.has_attribute(rows[i],publisher.att_use_as_head)
+        if use_as_head then
+            tableheads_extra[#splits + 1] = node.copy(rows[i])
+        end
+        local shiftup = node.has_attribute(rows[i],publisher.att_tr_shift_up) or 0
+        if shiftup > 0 then
+            rows[i].height = rows[i].height - shiftup
+        end
+
+
         pagegoal = pagegoals[current_page]
         ht_row = rows[i].height + rows[i].depth
         break_above = node.has_attribute(rows[i],publisher.att_break_above) or -1
@@ -1150,8 +1395,20 @@ function typeset_table(self)
         extra_height = extra_height + ht_row
         local fits_in_table = accumulated_height + extra_height + space_above < pagegoal
         if not fits_in_table then
+            if node.has_attribute(rows[i],publisher.att_use_as_head) == 1 then
+                -- the next line would be used as a header, so let's skip the
+                -- header on this page
+                omit_head_on_pages[#splits + 1] = true
+            end
+
+            if shiftup > 0 then
+                rows[i].height = rows[i].height + shiftup
+            end
             -- ==0 can happen when there's not enough room for table head + first line
             if last_possible_split_is_after_line ~= 0 then
+                if node.has_attribute(rows[last_possible_split_is_after_line + 1],publisher.att_use_as_head) then
+                    omit_head_on_pages[#splits + 1] = true
+                end
                 splits[#splits + 1] = last_possible_split_is_after_line
                 tablepart_absolute = tablepart_absolute + 1
             else
@@ -1196,17 +1453,15 @@ function typeset_table(self)
                 thissplittable[#thissplittable + 1] = node.copy_list(tmp2)
             end
         else
+            if showheader_static(s-1) then
+                thissplittable[#thissplittable + 1] = get_tablehead_static(s-1)
+            end
             if showheader(s-1) then
-                if s == 2 then
-                    -- first page
-                    thissplittable[#thissplittable + 1] = tablehead_first[1]
-                else
-                    -- page > 1
-                    thissplittable[#thissplittable + 1] = node.copy_list(tablehead[1])
-                end
+                thissplittable[#thissplittable + 1] = get_tablehead(s-1)
             end
         end
-        for i = first_row_in_new_table ,splits[s]  do
+
+        for i = first_row_in_new_table,splits[s]  do
             if i > first_row_in_new_table then
                 space_above = node.has_attribute(rows[i],publisher.att_space_amount) or 0
             else
@@ -1219,7 +1474,7 @@ function typeset_table(self)
 
         last_tr_data = node.has_attribute(thissplittable[#thissplittable - 1],publisher.att_tr_dynamic_data)
 
-        -- only refomat the foot when we have dynamic data _and_ have a foot to reformat.
+        -- only reformat the foot when we have dynamic data _and_ have a foot to reformat.
         if last_tr_data and self.tablefoot_contents then
             -- we have some data attached to table rows, so we re-format the footer
             local val = dynamic_data[last_tr_data]
@@ -1293,6 +1548,7 @@ function make_table( self )
         local x = node.new("vlist")
         return x
     end
+
     calculate_rowheights(self)
     publisher.xpath.set_variable("_last_tr_data","")
     return typeset_table(self)

@@ -1,0 +1,84 @@
+<changelog xmlns="urn:speedata.de:2014/changelog">
+  <chapter version="2.2">
+    <entry version="2.1.16" date="2014-08-22">
+      <en>Don't break lines on / anymore, unless specified in allowbreaks="/".</en>
+      <de>Zeilen dürfen bei / nicht mehr umbrochen werden, außer in erlaubeumbruch enthält den Schrägstrich.</de>
+    </entry>
+    <entry version="2.1.15" date="2014-08-18">
+      <en>Experimental server-mode (/v0/format)</en>
+      <de>Experimenteller Servermodus (/v0/format)</de>
+    </entry>
+    <entry version="2.1.14" date="2014-08-15">
+      <en>Hyphenation = yes/no at DefineTextformat</en>
+      <de>Silbentrennung bei DefiniereTextformat an- und ausschaltbar</de>
+    </entry>
+    <entry version="2.1.13" date="2014-08-12">
+      <en>Basic version of tokenize() and replace(), basic server mode.</en>
+      <de>Grundlegende Unterstützung von tokenize() und replace(), erste Funktionalität des Server-Modus.</de>
+    </entry>
+    <entry version="2.1.13" date="2014-08-07">
+      <en>Colors can have overprinting enabled.</en>
+      <de>Farben können die Eigenschaft »überdrucken« haben.</de>
+    </entry>
+    <entry version="2.1.13" date="2014-08-06">
+      <en>Spot colors (PANTONE and HKS)</en>
+      <de>Sonderfarben (PANTONE und HKS)</de>
+    </entry>
+    <entry version="2.1.12" date="2014-07-25">
+      <en>New command »Color« to switch to a different text color in text.</en>
+      <de>Neuer Befehl »Farbe« um vorübergehend die Textfarbe zu ändern.</de>
+    </entry>
+    <entry version="2.1.10" date="2014-07-03">
+      <en>Change behaviour of allowbreak=".." at Paragraph. Space must be made explicit.</en>
+      <de>Das Verhalten von erlaubeumbruch bei Absatz wurde geändert. Das Leerzeichen muss explizit angegeben werden.</de>
+    </entry>
+    <entry version="2.1.10" date="2014-06-29">
+      <en>New xpath function sd:dummytext() and sd:loremipsum() for a sample text (lorem ipsum)</en>
+      <de>Neue XPath-Funktion sd:blindtext() und sd:loremipsum() für Beispieltext (lorem ipsum)</de>
+    </entry>
+    <entry version="2.1.9" date="2014-06-27">
+      <en>XInclude rebirth</en>
+      <de>XInclude wieder aktiviert.</de>
+    </entry>
+    <entry version="2.1.8" date="2014-06-24">
+      <en>Extend table rows (Tr) to re-use as table header.</en>
+      <de>Tabellenzeilen (Tr) können als Tabellenkopf wiederbenutzt werden.</de>
+    </entry>
+    <entry version="2.1.8" date="2014-06-24">
+      <en>Merge pagenumbers now accept page ranges.</en>
+      <de>Seitenzahlen zusammenfassen verarbeitet Seitenbereiche.</de>
+    </entry>
+    <entry version="2.1.7" date="2014-06-06">
+      <en>Bugfix for table in table and alignment. align="right" didn't work.</en>
+      <de>Fehlerkorrektur für Tabellen in Tabellen, die rechtsbündig gesetzt werden sollen.</de>
+    </entry>
+    <entry version="2.1.6" date="2014-06-05">
+      <en>Experimental option 'allowbreak' on Paragraph to provide a list of characters where line break may occur.</en>
+      <de>Experimentelle Option 'erlaubeumbruch' bei Absatz um eine Liste der möglichen Trennpunkte anzugeben.</de>
+    </entry>
+    <entry version="2.1.6" date="2014-05-28">
+      <en>sp --quiet for console-less output</en>
+      <de>sp --quiet unterdrückt die Ausgabe</de>
+    </entry>
+    <entry version="2.1.6" date="2014-05-28">
+      <en>Parallelise sp compare for much better performance.</en>
+      <de>sp compare parallelisiert für höhrere Geschwindigkeit.</de>
+    </entry>
+    <entry version="2.1.5" date="2014-05-28">
+      <en>Bugfix table cells with align=center and a fixed width.</en>
+      <de>Fehlerbehebung bei Tabellenzellen mit align="center" und fixer Breite.</de>
+    </entry>
+    <entry version="2.1.3" date="2014-05-20">
+      <en>Allow hyphenation in the second word in compound words such as longword-anotherlongword. Also enable line breaks after "/"</en>
+      <de>Trennung im zweiten Wort in zusammengesetzten Wörtern erlauben, Umbruch möglich nach "/" </de>
+    </entry>
+    <entry version="2.1.1" date="2014-05-19">
+      <en>New implemtation of paragraph splitting, should be completely backward compatible.</en>
+      <de>Neue Implementierung des Textumbruchs in Spalten. Vollständig abwärtskompatibel.</de>
+    </entry>
+    <entry version="2.1.0" date="2014-05-15">
+      <en>New behaviour of contents in table cells (Td). The rules of HTML (see <a href="https://developer.mozilla.org/en-US/docs/Web/HTML/Block-level_elements">HTML block elements</a>) are followed as far as possible.</en>
+      <de>Neues Verhalten von Elementen in Tabellenzellen (Td). Nun wird, soweit sinnvoll, die Logik von HTML angewandt (siehe <a href="https://developer.mozilla.org/en-US/docs/Web/HTML/Block-level_elements">HTML Blockelemente</a>).</de>
+    </entry>
+  </chapter>
+</changelog>
